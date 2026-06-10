@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="LMS SMPN 167 Jakarta - Platform pembelajaran digital terpadu untuk siswa, guru, dan admin."
+    />
+    <title>LMS SMPN 167 Jakarta - Platform Pembelajaran Digital</title>
+
+    <style>
+      :root {
+        --primary: #1a237e;
+        --primary-light: #534bae;
+        --primary-dark: #000051;
+        --secondary: #dd2e24;
+        --secondary-light: #ff9f40;
+        --secondary-dark: #b71f18;
+        --accent: #1976d2;
+        --accent-light: #42a5f5;
+        --light: #f5f5f5;
+        --dark: #333333;
+        --white: #ffffff;
+        --gray: #757575;
+        --gray-light: #e0e0e0;
+        --border: rgba(26, 35, 126, 0.1);
+        --shadow: 0 8px 25px rgba(26, 35, 126, 0.08);
+        --shadow-hover: 0 15px 35px rgba(26, 35, 126, 0.15);
+        --container: 1200px;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background-color: #f9f9f9;
+        color: var(--dark);
+        line-height: 1.6;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      img {
+        max-width: 100%;
+        display: block;
+      }
+
+      .container {
+        width: 100%;
+        max-width: var(--container);
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: 16px;
+        top: -80px;
+        z-index: 999;
+        background: var(--primary);
+        color: var(--white);
+        padding: 10px 14px;
+        border-radius: 8px;
+        text-decoration: none;
+        transition: top 0.2s ease;
+      }
+
+      .skip-link:focus {
+        top: 16px;
+      }
+
+      /* Header dan Navigasi */
+      .site-header {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: var(--white);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+      }
+
+      .site-header__inner {
+        min-height: 78px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+        min-width: max-content;
+      }
+
+      .brand__logo {
+        width: 58px;
+        height: 58px;
+        object-fit: contain;
+      }
+
+      .brand__text {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.15;
+      }
+
+      .brand__name {
+        font-size: 1rem;
+        font-weight: 800;
+        color: var(--primary);
+        letter-spacing: 0.02em;
+      }
+
+      .brand__tagline {
+        font-size: 0.8rem;
+        color: var(--gray);
+      }
+
+      .nav-toggle {
+        display: none;
+        width: 44px;
+        height: 44px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--white);
+        color: var(--primary);
+        font-size: 1.6rem;
+        cursor: pointer;
+      }
+
+      .site-nav {
+        display: flex;
+        align-items: center;
+        gap: 28px;
+      }
+
+      .site-nav__list {
+        display: flex;
+        align-items: center;
+        list-style: none;
+        gap: 26px;
+      }
+
+      .site-nav__link {
+        color: var(--dark);
+        text-decoration: none;
+        font-weight: 600;
+        transition: color 0.2s ease;
+      }
+
+      .site-nav__link:hover,
+      .site-nav__link:focus {
+        color: var(--accent);
+      }
+
+      .site-nav__login {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 20px;
+        border-radius: 8px;
+        background: var(--secondary);
+        color: var(--white);
+        font-weight: 700;
+        text-decoration: none;
+        box-shadow: 0 4px 15px rgba(221, 46, 36, 0.25);
+        transition: transform 0.2s ease, background 0.2s ease;
+      }
+
+      .site-nav__login:hover,
+      .site-nav__login:focus {
+        background: var(--secondary-dark);
+        transform: translateY(-2px);
+      }
+
+      /* Komponen umum */
+      .section-title {
+        text-align: center;
+        margin-bottom: 60px;
+      }
+
+      .section-title h2 {
+        font-size: clamp(2rem, 4vw, 2.5rem);
+        color: var(--primary);
+        margin-bottom: 20px;
+        line-height: 1.2;
+      }
+
+      .section-title p {
+        color: var(--gray);
+        max-width: 760px;
+        margin: 0 auto;
+        font-size: 1.2rem;
+      }
+
+      .btn {
+        min-width: 200px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px 35px;
+        border-radius: 8px;
+        border: 0;
+        font-size: 1.1rem;
+        font-weight: 700;
+        line-height: 1.2;
+        cursor: pointer;
+        text-align: center;
+        text-decoration: none;
+        transition: transform 0.25s ease, box-shadow 0.25s ease,
+          background 0.25s ease;
+      }
+
+      .btn-primary {
+        background-color: var(--secondary);
+        color: var(--white);
+        box-shadow: 0 4px 15px rgba(221, 46, 36, 0.3);
+      }
+
+      .btn-primary:hover,
+      .btn-primary:focus {
+        background-color: var(--secondary-dark);
+        transform: translateY(-3px);
+        box-shadow: 0 6px 20px rgba(221, 46, 36, 0.4);
+      }
+
+      .btn-light {
+        background-color: var(--white);
+        color: var(--primary);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+      }
+
+      .btn-light:hover,
+      .btn-light:focus {
+        background-color: var(--gray-light);
+        transform: translateY(-3px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+      }
+
+      /* Hero */
+      .hero {
+        position: relative;
+        min-height: 80vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        text-align: center;
+        color: var(--white);
+        padding: 120px 0 100px;
+        background: linear-gradient(
+          135deg,
+          var(--primary) 0%,
+          var(--accent) 100%
+        );
+      }
+
+      .hero::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 320"><path fill="%23ffffff" fill-opacity="0.1" d="M0,96L48,112C96,128,192,160,288,186.7C384,213,480,235,576,213.3C672,192,768,128,864,128C960,128,1056,192,1152,192C1248,192,1344,128,1392,96L1440,64L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z"></path></svg>');
+        background-size: cover;
+        background-position: bottom;
+        pointer-events: none;
+      }
+
+      .hero__content {
+        position: relative;
+        z-index: 1;
+        width: 100%;
+      }
+
+      .hero h1 {
+        max-width: 980px;
+        margin: 0 auto 30px;
+        color: var(--white);
+        font-size: clamp(2rem, 5vw, 3.5rem);
+        font-weight: 800;
+        line-height: 1.2;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+      }
+
+      .hero p {
+        max-width: 800px;
+        margin: 0 auto 50px;
+        font-size: clamp(1.1rem, 2.5vw, 1.5rem);
+        font-weight: 300;
+        opacity: 0.95;
+      }
+
+      .hero__actions {
+        display: flex;
+        justify-content: center;
+        gap: 25px;
+        flex-wrap: wrap;
+      }
+
+      /* Features */
+      .features {
+        padding: 100px 0;
+        background-color: var(--white);
+      }
+
+      .features-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 40px;
+      }
+
+      .feature-card {
+        background-color: var(--light);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 40px 30px;
+        text-align: center;
+        box-shadow: var(--shadow);
+        transition: transform 0.25s ease, box-shadow 0.25s ease;
+      }
+
+      .feature-card:hover {
+        transform: translateY(-10px);
+        box-shadow: var(--shadow-hover);
+      }
+
+      .feature-card__icon {
+        margin-bottom: 25px;
+        color: var(--primary);
+        font-size: 3.5rem;
+        line-height: 1;
+      }
+
+      .feature-card h3 {
+        margin-bottom: 20px;
+        color: var(--primary-dark);
+        font-size: 1.5rem;
+        line-height: 1.3;
+      }
+
+      .feature-card p {
+        color: var(--dark);
+        line-height: 1.7;
+      }
+
+      /* About */
+      .about {
+        padding: 100px 0;
+        background-color: var(--light);
+      }
+
+      .about__content {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        align-items: center;
+        gap: 60px;
+      }
+
+      .about__text h2 {
+        margin-bottom: 25px;
+        color: var(--primary);
+        font-size: clamp(2rem, 4vw, 2.5rem);
+        line-height: 1.2;
+      }
+
+      .about__text p {
+        margin-bottom: 25px;
+        color: var(--dark);
+        font-size: 1.1rem;
+        line-height: 1.8;
+      }
+
+      .about__visual {
+        min-height: 400px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        padding: 36px;
+        border-radius: 12px;
+        color: var(--white);
+        text-align: center;
+        background: linear-gradient(
+          135deg,
+          var(--primary) 0%,
+          var(--accent) 100%
+        );
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+      }
+
+      .about__visual-icon {
+        font-size: 4rem;
+      }
+
+      .about__visual h3 {
+        color: var(--white);
+        font-size: 1.6rem;
+        line-height: 1.3;
+      }
+
+      .about__visual p {
+        max-width: 360px;
+        opacity: 0.9;
+      }
+
+      /* Login */
+      .login-section {
+        padding: 100px 0;
+        background-color: var(--white);
+        text-align: center;
+      }
+
+      .login-options {
+        display: flex;
+        justify-content: center;
+        gap: 40px;
+        margin-top: 50px;
+        flex-wrap: wrap;
+      }
+
+      .login-card {
+        width: 300px;
+        background-color: var(--light);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 50px 30px;
+        box-shadow: var(--shadow);
+        transition: transform 0.25s ease, box-shadow 0.25s ease;
+      }
+
+      .login-card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 12px 30px rgba(26, 35, 126, 0.12);
+      }
+
+      .login-card__icon {
+        margin-bottom: 25px;
+        color: var(--primary);
+        font-size: 3.5rem;
+        line-height: 1;
+      }
+
+      .login-card h3 {
+        margin-bottom: 20px;
+        color: var(--primary-dark);
+        font-size: 1.5rem;
+      }
+
+      .login-card p {
+        margin-bottom: 30px;
+        color: var(--dark);
+        line-height: 1.7;
+      }
+
+      /* Footer */
+      .site-footer {
+        background-color: var(--primary-dark);
+        color: var(--white);
+        padding: 80px 0 30px;
+      }
+
+      .footer-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 50px;
+        margin-bottom: 50px;
+      }
+
+      .footer-column h2,
+      .footer-column h3 {
+        margin-bottom: 25px;
+        color: var(--white);
+        font-size: 1.4rem;
+        line-height: 1.3;
+      }
+
+      .footer-column p {
+        color: #cccccc;
+        font-size: 1.05rem;
+      }
+
+      .footer-column ul {
+        list-style: none;
+      }
+
+      .footer-column li {
+        margin-bottom: 12px;
+      }
+
+      .footer-column a {
+        color: #cccccc;
+        text-decoration: none;
+        font-size: 1.05rem;
+        transition: color 0.2s ease;
+      }
+
+      .footer-column a:hover,
+      .footer-column a:focus {
+        color: var(--white);
+      }
+
+      .contact-info {
+        margin-top: 25px;
+      }
+
+      .contact-info p {
+        margin-bottom: 15px;
+      }
+
+      .copyright {
+        padding-top: 30px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        color: #cccccc;
+        text-align: center;
+        font-size: 1rem;
+      }
+
+      /* Responsive */
+      @media (max-width: 992px) {
+        .features-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .about__content {
+          grid-template-columns: 1fr;
+        }
+
+        .about__visual {
+          order: -1;
+        }
+
+        .footer-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 768px) {
+        .site-header__inner {
+          min-height: 70px;
+        }
+
+        .brand__logo {
+          width: 48px;
+          height: 48px;
+        }
+
+        .brand__tagline {
+          display: none;
+        }
+
+        .nav-toggle {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .site-nav {
+          position: absolute;
+          top: 70px;
+          left: 0;
+          right: 0;
+          display: none;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 16px;
+          padding: 20px;
+          background: var(--white);
+          border-top: 1px solid var(--border);
+          box-shadow: 0 12px 20px rgba(0, 0, 0, 0.08);
+        }
+
+        .site-nav.is-open {
+          display: flex;
+        }
+
+        .site-nav__list {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0;
+        }
+
+        .site-nav__link {
+          display: block;
+          padding: 12px 0;
+        }
+
+        .site-nav__login {
+          width: 100%;
+        }
+
+        .hero {
+          min-height: 70vh;
+          padding: 100px 0 80px;
+        }
+
+        .hero__actions {
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .btn {
+          width: 220px;
+        }
+
+        .features-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .login-options {
+          flex-direction: column;
+          align-items: center;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .footer-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .btn {
+          min-width: 180px;
+          padding: 14px 25px;
+        }
+      }
+    </style>
+  </head>
+  <body data-page-type="landing-page" data-ai-page="lms-home">
+    <a class="skip-link" href="#main-content">Lewati ke konten utama</a>
+
+    <header class="site-header" data-ai-section="main-header">
+      <div class="container site-header__inner">
+        <a
+          class="brand"
+          href="https://lms.smpn167jakarta.sch.id/"
+          aria-label="Beranda LMS SMPN 167 Jakarta"
+        >
+          <img
+            class="brand__logo"
+            src="https://lms.smpn167jakarta.sch.id/pluginfile.php/1/theme_mb2nl/logo/1776930830/SMPN%20167%20TAKAIRIA.png"
+            alt="Logo SMPN 167 Jakarta"
+          />
+          <span class="brand__text">
+            <span class="brand__name">LMS SMPN 167 Jakarta</span>
+            <span class="brand__tagline">Platform Pembelajaran Digital</span>
+          </span>
+        </a>
+
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-label="Buka menu navigasi"
+          aria-controls="primary-navigation"
+          aria-expanded="false"
+        >
+          ☰
+        </button>
+
+        <nav
+          id="primary-navigation"
+          class="site-nav"
+          aria-label="Navigasi utama"
+          data-ai-section="navigation"
+        >
+          <ul class="site-nav__list">
+            <li><a class="site-nav__link" href="#beranda">Beranda</a></li>
+            <li><a class="site-nav__link" href="#fitur">Fitur</a></li>
+            <li><a class="site-nav__link" href="#tentang">Tentang</a></li>
+            <li><a class="site-nav__link" href="#akses">Akses</a></li>
+            <li><a class="site-nav__link" href="#kontak">Kontak</a></li>
+          </ul>
+          <a
+            class="site-nav__login"
+            href="https://lms.smpn167jakarta.sch.id/login/index.php"
+            >Log in</a
+          >
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section id="beranda" class="hero" data-ai-section="hero">
+        <div class="container hero__content">
+          <h1>Selamat Datang di LMS SMPN 167 Jakarta</h1>
+          <p>
+            Platform Pembelajaran Digital Terpadu untuk Pendidikan Berkualitas
+          </p>
+          <div class="hero__actions" aria-label="Aksi utama">
+            <a href="#fitur" class="btn btn-light">Jelajahi Fitur</a>
+            <a href="#akses" class="btn btn-primary">Panduan Penggunaan</a>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="fitur"
+        class="features"
+        aria-labelledby="fitur-title"
+        data-ai-section="features"
+      >
+        <div class="container">
+          <div class="section-title">
+            <h2 id="fitur-title">Fitur Unggulan</h2>
+            <p>
+              Platform LMS kami dilengkapi dengan berbagai fitur canggih untuk
+              mendukung proses pembelajaran yang efektif.
+            </p>
+          </div>
+
+          <div class="features-grid">
+            <article class="feature-card" data-ai-card="feature">
+              <div class="feature-card__icon" aria-hidden="true">📚</div>
+              <h3>Kelas Digital Interaktif</h3>
+              <p>
+                Ruang belajar virtual yang lengkap dengan materi pembelajaran
+                terstruktur dan fitur kolaborasi untuk pengalaman belajar yang
+                optimal.
+              </p>
+            </article>
+
+            <article class="feature-card" data-ai-card="feature">
+              <div class="feature-card__icon" aria-hidden="true">📝</div>
+              <h3>Penugasan Online</h3>
+              <p>
+                Sistem pengumpulan dan penilaian tugas yang efisien dengan
+                feedback langsung dari guru untuk meningkatkan kualitas
+                pembelajaran.
+              </p>
+            </article>
+
+            <article class="feature-card" data-ai-card="feature">
+              <div class="feature-card__icon" aria-hidden="true">💬</div>
+              <h3>Forum Diskusi</h3>
+              <p>
+                Wadah kolaborasi antara siswa dan guru untuk berdiskusi,
+                bertukar pikiran, dan menyelesaikan masalah pembelajaran
+                bersama.
+              </p>
+            </article>
+
+            <article class="feature-card" data-ai-card="feature">
+              <div class="feature-card__icon" aria-hidden="true">📊</div>
+              <h3>Monitoring Progress</h3>
+              <p>
+                Pemantauan perkembangan belajar siswa secara real-time dengan
+                laporan yang komprehensif dan mudah dipahami.
+              </p>
+            </article>
+
+            <article class="feature-card" data-ai-card="feature">
+              <div class="feature-card__icon" aria-hidden="true">📅</div>
+              <h3>Kalender Akademik</h3>
+              <p>
+                Jadwal pembelajaran, ujian, dan kegiatan akademik lainnya yang
+                terintegrasi untuk memudahkan perencanaan belajar.
+              </p>
+            </article>
+
+            <article class="feature-card" data-ai-card="feature">
+              <div class="feature-card__icon" aria-hidden="true">📱</div>
+              <h3>Akses Mobile</h3>
+              <p>
+                Platform yang responsif dan dapat diakses melalui berbagai
+                perangkat mobile untuk belajar kapan saja dan di mana saja.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="tentang"
+        class="about"
+        aria-labelledby="tentang-title"
+        data-ai-section="about"
+      >
+        <div class="container about__content">
+          <div class="about__text">
+            <h2 id="tentang-title">Tentang LMS Kami</h2>
+            <p>
+              Learning Management System SMP Negeri 167 Jakarta hadir sebagai
+              solusi pembelajaran digital yang terintegrasi, mendukung proses
+              belajar mengajar yang efektif dan inovatif bagi seluruh civitas
+              akademika.
+            </p>
+            <p>
+              Platform ini dirancang untuk memfasilitasi pembelajaran jarak jauh
+              maupun hybrid, dengan fokus pada pengalaman belajar yang
+              interaktif, kolaboratif, dan terpersonalisasi sesuai kebutuhan
+              masing-masing siswa.
+            </p>
+            <p>
+              Dengan antarmuka yang user-friendly dan fitur yang lengkap, LMS
+              SMPN 167 Jakarta siap mendukung terwujudnya generasi unggul yang
+              siap menghadapi tantangan di era digital dengan kompetensi yang
+              mumpuni.
+            </p>
+            <a href="#fitur" class="btn btn-primary">Pelajari Lebih Lanjut</a>
+          </div>
+
+          <aside
+            class="about__visual"
+            aria-label="Ilustrasi pembelajaran digital"
+            data-ai-section="about-visual"
+          >
+            <div class="about__visual-icon" aria-hidden="true">🎓</div>
+            <h3>Pembelajaran Digital Terpadu</h3>
+            <p>
+              Satu platform untuk mengakses materi, tugas, diskusi, dan
+              perkembangan belajar.
+            </p>
+          </aside>
+        </div>
+      </section>
+
+      <section
+        id="akses"
+        class="login-section"
+        aria-labelledby="akses-title"
+        data-ai-section="login-options"
+      >
+        <div class="container">
+          <div class="section-title">
+            <h2 id="akses-title">Akses Pembelajaran Anda</h2>
+            <p>
+              Silakan login untuk mengakses materi pembelajaran dan fitur
+              lengkap LMS.
+            </p>
+          </div>
+
+          <div class="login-options">
+            <article
+              class="login-card"
+              data-ai-card="login-option"
+              data-role="siswa"
+            >
+              <div class="login-card__icon" aria-hidden="true">👨‍🎓</div>
+              <h3>Login Siswa</h3>
+              <p>
+                Akses materi pembelajaran, tugas, forum diskusi, dan monitoring
+                progress belajar.
+              </p>
+              <a
+                href="https://lms.smpn167jakarta.sch.id/login/index.php"
+                class="btn btn-primary"
+                >Login Siswa</a
+              >
+            </article>
+
+            <article
+              class="login-card"
+              data-ai-card="login-option"
+              data-role="guru"
+            >
+              <div class="login-card__icon" aria-hidden="true">👨‍🏫</div>
+              <h3>Login Guru</h3>
+              <p>
+                Kelola kelas, materi pembelajaran, penugasan, penilaian, dan
+                forum diskusi.
+              </p>
+              <a
+                href="https://lms.smpn167jakarta.sch.id/login/index.php"
+                class="btn btn-primary"
+                >Login Guru</a
+              >
+            </article>
+
+            <article
+              class="login-card"
+              data-ai-card="login-option"
+              data-role="admin"
+            >
+              <div class="login-card__icon" aria-hidden="true">👨‍💼</div>
+              <h3>Login Admin</h3>
+              <p>
+                Kelola sistem, pengguna, konten platform, dan monitoring
+                keseluruhan aktivitas.
+              </p>
+              <a
+                href="https://lms.smpn167jakarta.sch.id/login/index.php"
+                class="btn btn-primary"
+                >Login Admin</a
+              >
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer id="kontak" class="site-footer" data-ai-section="footer">
+      <div class="container">
+        <div class="footer-grid">
+          <section class="footer-column" aria-labelledby="footer-school-title">
+            <h2 id="footer-school-title">SMPN 167 Jakarta</h2>
+            <p>Mewujudkan Generasi Unggul melalui Pendidikan Digital.</p>
+            <address class="contact-info">
+              <p>📧 admin@smpn167jakarta.sch.id</p>
+              <p>📞 (021) 8620641</p>
+              <p>📍 Jl. Lingkar Timur Duren Sawit</p>
+            </address>
+          </section>
+
+          <section class="footer-column" aria-labelledby="footer-links-title">
+            <h3 id="footer-links-title">Tautan Cepat</h3>
+            <ul>
+              <li><a href="#beranda">Beranda</a></li>
+              <li><a href="#tentang">Tentang Kami</a></li>
+              <li><a href="#fitur">Fitur LMS</a></li>
+              <li><a href="#akses">Panduan Penggunaan</a></li>
+              <li><a href="#kontak">Kontak</a></li>
+            </ul>
+          </section>
+
+          <section
+            class="footer-column"
+            aria-labelledby="footer-services-title"
+          >
+            <h3 id="footer-services-title">Layanan</h3>
+            <ul>
+              <li><a href="#fitur">Kelas Digital</a></li>
+              <li><a href="#fitur">Materi Pembelajaran</a></li>
+              <li><a href="#fitur">Penugasan Online</a></li>
+              <li><a href="#fitur">Forum Diskusi</a></li>
+              <li><a href="#fitur">Nilai &amp; Raport</a></li>
+            </ul>
+          </section>
+
+          <section class="footer-column" aria-labelledby="footer-legal-title">
+            <h3 id="footer-legal-title">Legal</h3>
+            <ul>
+              <li><a href="#kontak">Kebijakan Privasi</a></li>
+              <li><a href="#kontak">Syarat &amp; Ketentuan</a></li>
+              <li><a href="#kontak">Kebijakan Cookie</a></li>
+              <li><a href="#kontak">Bantuan &amp; Dukungan</a></li>
+            </ul>
+          </section>
+        </div>
+
+        <div class="copyright">
+          <p>© 2025 SMPN 167 Jakarta. All Rights Reserved.</p>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      const navToggle = document.querySelector(".nav-toggle");
+      const primaryNavigation = document.querySelector("#primary-navigation");
+
+      navToggle.addEventListener("click", () => {
+        const isOpen = primaryNavigation.classList.toggle("is-open");
+        navToggle.setAttribute("aria-expanded", String(isOpen));
+        navToggle.textContent = isOpen ? "×" : "☰";
+      });
+    </script>
+  </body>
+</html>
