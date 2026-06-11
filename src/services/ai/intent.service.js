@@ -20,7 +20,17 @@ const ALLOWED_INTENTS = [
   'hubungi_guru',
   'bantuan_burnout',
   'out_of_context',
-  'general_learning_help'
+  'general_learning_help',
+  'bantuan_umum',
+  'bantuan_lupa_password',
+  'bantuan_buka_materi',
+  'bantuan_kumpul_tugas',
+  'bantuan_quiz',
+  'bantuan_forum',
+  'bantuan_lihat_nilai',
+  'tanya_deadline',
+  'cek_tugas_belum',
+  'tutorial_steps'
 ];
 
 const normalizeText = (value = '') => String(value || '')
@@ -52,6 +62,27 @@ function ruleBasedDetect(message = '', elementContext = null) {
   }
 
   const msg = normalizeText(stripFeedbackPrefix(message));
+
+  // DETEKSI DEADLINE
+  if (hasAny(msg, [/\b(deadline|tugas apa yang belum|ada tugas|quiz mana yang belum|jadwal tugas)\b/])) {
+    return 'tanya_deadline';
+  }
+
+  // DETEKSI FORUM
+  // Harus diletakkan sebelum deteksi tugas umum,
+  // supaya "cara jawab forum" tidak masuk ke bantuan_tugas.
+  if (hasAny(msg, [
+    /\b(forum|diskusi|posting|postingan|reply|balas|membalas|menanggapi|topik diskusi)\b/
+  ]) && hasAny(msg, [
+    /\b(cara|gimana|bagaimana|tutorial|panduan|langkah|buat|membuat|jawab|menjawab|reply|balas|membalas|kerjakan|mengerjakan)\b/
+  ])) {
+    return 'bantuan_forum';
+  }
+
+  // DETEKSI PROCEDURAL/TUTORIAL SECARA SPESIFIK
+  if (hasAny(msg, [/\b(cara login|langkah login|langkah masuk|cara kumpul tugas|langkah kumpul tugas|cara ngerjain quiz)\b/])) {
+    return 'tutorial_steps';
+  }
 
   // 2) Hard out-of-context / jailbreak / code gen.
   if (hasAny(msg, [
@@ -135,7 +166,12 @@ function ruleBasedDetect(message = '', elementContext = null) {
     return 'bantuan_kuis';
   }
 
-  if (hasAny(msg, [/\b(tugas|assignment|upload|unggah|kumpul|submit|mengumpulkan)\b/])) {
+  // Kalau ada kata forum, jangan masuk bantuan_tugas.
+  // Forum punya intent sendiri: bantuan_forum.
+  if (
+    hasAny(msg, [/\b(tugas|assignment|upload|unggah|kumpul|submit|mengumpulkan)\b/]) &&
+    !hasAny(msg, [/\b(forum|diskusi|reply|balas|postingan|topik diskusi)\b/])
+  ) {
     return 'bantuan_tugas';
   }
 
@@ -145,6 +181,25 @@ function ruleBasedDetect(message = '', elementContext = null) {
 
   if (hasAny(msg, [/\b(dashboard|beranda|menu utama|halaman utama)\b/])) {
     return 'bantuan_dashboard';
+  }
+
+  const materialTopicWords = [
+    /\b(media sosial|sosial media|cyberbullying|hoax|internet|informatika)\b/
+  ];
+
+  const materialAskWords = [
+    /\b(apa|apa saja|apa aja|jelaskan|sebutkan|contoh|maksud|pengertian|kenapa|mengapa|bagaimana)\b/
+  ];
+
+  const materialConceptWords = [
+    /\b(dampak|pengaruh|efek|akibat|manfaat|kelebihan|kekurangan|positif|negatif|risiko|bahaya|jenis|ciri|contoh)\b/
+  ];
+
+  if (
+    hasAny(msg, materialTopicWords) &&
+    hasAny(msg, materialAskWords.concat(materialConceptWords))
+  ) {
+    return 'penjelasan_materi';
   }
 
   // Pertanyaan materi. Kata "media sosial" harus masuk ke sini, bukan profanity / burnout.
@@ -162,7 +217,7 @@ function ruleBasedDetect(message = '', elementContext = null) {
   }
 
   if (hasAny(msg, [/\b(cara|gimana|bagaimana|klik|buka|tutorial|panduan|langkah|akses)\b/])) {
-    return 'bantuan_umum';
+    return 'general_learning_help';
   }
 
   return null;
@@ -180,6 +235,7 @@ Aturan penting:
 - Kalau user bertanya cara masuk akun: bantuan_login.
 - Kalau user bertanya mencari/masuk kursus/course/kelas/mapel/Informatika: navigasi_kursus.
 - Kalau user sudah login atau sudah masuk kursus lalu mau mencari/membuka materi/modul/PDF/dokumen: akses_materi.
+- Kalau user bertanya cara membuat, menjawab, membalas, reply, atau mengerjakan forum diskusi: bantuan_forum.
 - Kalau user bertanya arti/pengertian/apa itu materi pelajaran, termasuk "media sosial": penjelasan_materi.
 - Kata "guru" hanya sumber instruksi, bukan burnout.
 - Jangan pilih bantuan_burnout kecuali user jelas capek/lelah/stres/nyerah/tidak sanggup.

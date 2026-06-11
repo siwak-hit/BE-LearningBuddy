@@ -136,7 +136,17 @@ const externalLoaderService = {
         '  <h3 style="margin:0 0 6px 0;font-size:18px;color:#1a1a1a;font-weight:700;">Mulai Sesi Belajar</h3>',
         '  <p style="margin:0 0 16px 0;font-size:13px;color:#666;">Beri tahu AI Buddy namamu agar dia bisa mengenalimu.</p>',
         '  <input id="alb-input-nama" type="text" placeholder="Nama Lengkap / Panggilan" style="width:100%;padding:10px 12px;margin-bottom:12px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;" onfocus="this.style.borderColor=\\''+primaryColor+'\\'" onblur="this.style.borderColor=\\'#e5e5e5\\'">',
-        '  <input id="alb-input-kelas" type="text" placeholder="Kelas (Contoh: 4KA29)" style="width:100%;padding:10px 12px;margin-bottom:20px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;" onfocus="this.style.borderColor=\\''+primaryColor+'\\'" onblur="this.style.borderColor=\\'#e5e5e5\\'">',
+        '  <select id="alb-input-kelas" style="width:100%;padding:10px 12px;margin-bottom:20px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;background:#fff;color:#1a1a1a;" onfocus="this.style.borderColor=\\''+primaryColor+'\\'" onblur="this.style.borderColor=\\'#e5e5e5\\'">',
+        '    <option value="">Pilih Kelas</option>',
+        '    <option value="8A">8A</option>',
+        '    <option value="8B">8B</option>',
+        '    <option value="8C">8C</option>',
+        '    <option value="8D">8D</option>',
+        '    <option value="8E">8E</option>',
+        '    <option value="8F">8F</option>',
+        '    <option value="8G">8G</option>',
+        '    <option value="8H">8H</option>',
+        '  </select>',
         '  <div style="display:flex;gap:8px;justify-content:flex-end;">',
         '    <button id="alb-btn-cancel" style="padding:8px 16px;border:none;background:transparent;color:#666;cursor:pointer;font-weight:600;font-size:13px;border-radius:6px;">Batal</button>',
         '    <button id="alb-btn-submit" style="padding:8px 16px;border:none;background:'+primaryColor+';color:'+buttonTextColor+';border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;transition:opacity 0.2s;">Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i></button>',
@@ -159,6 +169,10 @@ const externalLoaderService = {
           return;
         }
 
+        if (!kelas) {
+          document.getElementById('alb-input-kelas').style.borderColor = 'red';
+          return;
+        }
         var alias = nama + (kelas ? ' - ' + kelas : '');
         sessionStorage.setItem('alb_student_name', alias);
 
@@ -168,16 +182,26 @@ const externalLoaderService = {
         btnSubmit.style.opacity = '0.7';
 
         // PAYLOAD BARU: Tanpa getPageContext() yang berat
+        var cleanKelas = kelas;
+
         var payload = {
           projectKey: projectKey,
           sourceUrl: window.location.href,
           studentAlias: alias,
           mode: 'external',
+
+          courseContext: {
+            class_code: cleanKelas
+          },
+
           pageContext: {
             title: document.title,
             heading: (document.querySelector('h1') || {}).innerText || '',
             summary: (document.querySelector('main p') || {}).innerText || 'Halaman Virtual Class',
-            session_meta: { display_name: alias }
+            session_meta: {
+              display_name: alias,
+              class_code: cleanKelas
+            }
           }
         };
 

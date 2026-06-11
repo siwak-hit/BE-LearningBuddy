@@ -31,14 +31,36 @@ const chatController = {
     }
 
     const safePageContext = pageContext || {};
-    safePageContext.session_meta = { display_name: displayName };
-    safePageContext.safety_state = { warnings: 0, locked: false };
+    const safeCourseContext = courseContext || {};
+    const existingSessionMeta = safePageContext.session_meta || {};
+
+    const finalClassCode =
+      safeCourseContext.class_code ||
+      existingSessionMeta.class_code ||
+      existingSessionMeta.kelas ||
+      null;
+
+    safePageContext.session_meta = {
+      ...existingSessionMeta,
+      display_name: displayName,
+      class_code: finalClassCode
+    };
+
+    safePageContext.safety_state = {
+      warnings: 0,
+      locked: false,
+      burnout_count: 0
+    };
 
     const sessionData = {
       project_id: projectId,
       session_key: sessionKey,
+      student_alias: studentAlias || displayName,
       source_url: sourceUrl || '',
-      course_context: courseContext || {},
+      course_context: {
+        ...safeCourseContext,
+        class_code: finalClassCode
+      },
       page_context: safePageContext
     };
 
@@ -63,15 +85,15 @@ const chatController = {
   }),
 
   sendMessage: asyncHandler(async (req, res) => {
-    // 1. Tangkap expectedSourceType dari FE
-    const { sessionId, message, pageContext, elementContext, expectedSourceType, forceAI } = req.body;
+    // 1. Tangkap seluruh parameter baru dari Frontend payload
+    const { sessionId, message, pageContext, elementContext, expectedSourceType, forceAI, forceFAQ, responseMode, intent } = req.body;
 
     if (!sessionId || !message) return response.error(res, 'sessionId dan message wajib diisi', null, 400);
 
     const session = await chatModel.getSessionById(sessionId);
     if (!session) return response.error(res, 'Sesi chat tidak valid', null, 404);
 
-    // 2. TERUSKAN expectedSourceType KE SERVICE LAYER
+    // 2. TERUSKAN seluruh parameter baru ke SERVICE LAYER
     const result = await chatService.processMessage({
       sessionId,
       projectId: session.project_id,
@@ -79,7 +101,10 @@ const chatController = {
       pageContext,
       elementContext,
       expectedSourceType,
-      forceAI: forceAI === true // diteruskan agar tombol "Belum, jelaskan dengan AI" benar-benar memakai AI
+      forceAI: forceAI === true,
+      forceFAQ: forceFAQ === true,
+      responseMode: responseMode || 'default',
+      intent: intent || null // Mengatasi error undefined intent
     });
 
     return response.success(res, 'Pesan berhasil diproses', result, 200);

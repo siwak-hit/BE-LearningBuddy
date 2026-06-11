@@ -366,7 +366,11 @@ const systemResponseService = {
             label: `Buka ${r.title || 'Materi'}`,
             url: r.metadata.file_url,
             page_number: r.metadata.page_number || r.metadata.page || 1,
-            query: message
+            query: message,
+            highlight_text: r.metadata.highlight_text || r.content || '',
+            chunk_id: r.metadata.chunk_id || null,
+            chunk_index: r.metadata.chunk_index || null,
+            document_id: r.metadata.document_id || null
           });
         }
       });

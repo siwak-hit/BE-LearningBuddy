@@ -78,6 +78,11 @@ CREATE TABLE public.activity_instructions (
   completion_criteria text,
   confusing_points text,
   created_at timestamp with time zone NOT NULL DEFAULT now(),
+  default_page_type text DEFAULT 'course'::text,
+  default_navigation_status text DEFAULT 'course_only'::text,
+  default_target_url text,
+  moodle_activity_type text,
+  moodle_module_id integer,
   CONSTRAINT activity_instructions_pkey PRIMARY KEY (id),
   CONSTRAINT activity_instructions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
 );
@@ -193,4 +198,36 @@ CREATE TABLE public.page_templates (
   accessibility_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   CONSTRAINT page_templates_pkey PRIMARY KEY (id),
   CONSTRAINT page_templates_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
+);
+CREATE TABLE public.lms_course_routes (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  class_code text NOT NULL,
+  course_id integer NOT NULL,
+  course_url text NOT NULL,
+  course_title text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT lms_course_routes_pkey PRIMARY KEY (id),
+  CONSTRAINT lms_course_routes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
+);
+CREATE TABLE public.lms_activity_routes (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  activity_instruction_id uuid,
+  class_code text NOT NULL,
+  course_id integer NOT NULL,
+  activity_type text,
+  activity_title text NOT NULL,
+  moodle_activity_type text,
+  moodle_module_id integer,
+  activity_url text NOT NULL,
+  source_page_url text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT lms_activity_routes_pkey PRIMARY KEY (id),
+  CONSTRAINT lms_activity_routes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id),
+  CONSTRAINT lms_activity_routes_activity_instruction_id_fkey FOREIGN KEY (activity_instruction_id) REFERENCES public.activity_instructions(id)
 );

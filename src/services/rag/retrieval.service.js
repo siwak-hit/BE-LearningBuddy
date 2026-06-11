@@ -3,6 +3,95 @@ const activityModel = require('../../models/activity.model');
 const chunkModel = require('../../models/chunk.model');
 const keywordScoreService = require('./keyword-score.service');
 
+function normalizeText(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getQueryFocus(query = '') {
+  const q = normalizeText(query);
+
+  if (/\b(dampak|pengaruh|efek|akibat|positif|negatif|manfaat|risiko|bahaya)\b/.test(q)) {
+    return {
+      type: 'dampak',
+      mustHave: ['dampak'],
+      shouldHave: ['positif', 'negatif', 'pengaruh', 'efek', 'akibat', 'manfaat', 'risiko', 'bahaya']
+    };
+  }
+
+  if (/\b(pengertian|apa itu|maksud|definisi)\b/.test(q)) {
+    return {
+      type: 'pengertian',
+      mustHave: ['pengertian'],
+      shouldHave: ['adalah', 'merupakan', 'definisi']
+    };
+  }
+
+  if (/\b(jenis|macam|kategori)\b/.test(q)) {
+    return {
+      type: 'jenis',
+      mustHave: ['jenis'],
+      shouldHave: ['contoh', 'kategori', 'macam']
+    };
+  }
+
+  if (/\b(hoax|hoaks)\b/.test(q)) {
+    return {
+      type: 'hoax',
+      mustHave: ['hoax'],
+      shouldHave: ['ciri', 'verifikasi', 'berita palsu']
+    };
+  }
+
+  if (/\b(cyberbullying|bullying|perundungan)\b/.test(q)) {
+    return {
+      type: 'cyberbullying',
+      mustHave: ['cyberbullying'],
+      shouldHave: ['korban', 'pelaku', 'dampak', 'mencegah']
+    };
+  }
+
+  return null;
+}
+
+function applyFocusBoost(item, query) {
+  const focus = getQueryFocus(query);
+  if (!focus) return 0;
+
+  const haystack = normalizeText([
+    item.title,
+    item.topic,
+    item.content,
+    item.metadata?.title
+  ].filter(Boolean).join(' '));
+
+  let boost = 0;
+
+  focus.mustHave.forEach((word) => {
+    if (haystack.includes(normalizeText(word))) boost += 20;
+  });
+
+  focus.shouldHave.forEach((word) => {
+    if (haystack.includes(normalizeText(word))) boost += 8;
+  });
+
+  // Penalti khusus:
+  // Kalau user nanya dampak, tapi chunk cuma pengertian/media sosial umum,
+  // turunkan skornya.
+  if (focus.type === 'dampak' && !haystack.includes('dampak')) {
+    boost -= 25;
+  }
+
+  if (focus.type === 'pengertian' && haystack.includes('dampak')) {
+    boost -= 10;
+  }
+
+  return boost;
+}
+
 const retrievalService = {
   async retrieve(projectId, query, pageContext, limit = 5, options = {}) {
     const sourceType = options.sourceType || options.source_type || 'all';
@@ -38,7 +127,12 @@ const retrievalService = {
         title: act.title,
         topic: act.topic || '',
         content: `Instruksi: ${act.instruction}\nKriteria Selesai: ${act.completion_criteria || ''}`,
-        metadata: { activity_id: act.id }
+        metadata: {
+          activity_id: act.id,
+          activity_type: act.activity_type,
+          rules: act.rules,
+          deadline: act.deadline
+        }
       });
     });
 
@@ -64,8 +158,18 @@ const retrievalService = {
 
     // 5. Hitung skor untuk setiap baris data
     results = results.map(item => {
-      const score = keywordScoreService.calculateScore(item, query, pageContext);
-      return { ...item, score };
+      const baseScore = keywordScoreService.calculateScore(item, query, pageContext);
+      const focusBoost = applyFocusBoost(item, query);
+      const score = baseScore + focusBoost;
+
+      return {
+        ...item,
+        score,
+        debug_score: {
+          baseScore,
+          focusBoost
+        }
+      };
     });
 
     // 6. Saring (hanya yang punya skor > 0), urutkan, dan potong sesuai limit

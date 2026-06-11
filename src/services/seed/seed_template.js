@@ -56,7 +56,7 @@ const templatesConfig = [
   {
     file: 'COURSE DETAIL.html',
     type: 'course',
-    name: 'Detail Mata Kuliah',
+    name: 'Detail Kursus',
     match_url: 'course/view',
     match_title: null,
     match_heading: null
