@@ -8,12 +8,7 @@ function safeParseJson(value, fallback = []) {
 }
 
 function normalizeText(value = '') {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/log\s*in/g, 'login')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return String(value || '').toLowerCase().replace(/log\s*in/g, 'login').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function cleanFeedbackPrompt(message = '') {
@@ -26,438 +21,618 @@ function cleanFeedbackPrompt(message = '') {
   return result || message || '';
 }
 
-function getTemplateElements(template = {}) {
-  return safeParseJson(template?.elements_json, []);
-}
-
-function getTemplateAccessibility(template = {}) {
-  return safeParseJson(template?.accessibility_json, []);
-}
-
-function getAllTemplateElements(template = {}) {
-  return [...getTemplateElements(template), ...getTemplateAccessibility(template)];
-}
-
+function getTemplateElements(template = {}) { return safeParseJson(template?.elements_json, []); }
+function getTemplateAccessibility(template = {}) { return safeParseJson(template?.accessibility_json, []); }
+function getAllTemplateElements(template = {}) { return [...getTemplateElements(template), ...getTemplateAccessibility(template)]; }
 function isTemplateProbablyFor(template = {}, targets = []) {
-  const haystack = normalizeText([
-    template?.page_type,
-    template?.template_name,
-    template?.match_url_contains,
-    template?.match_title_contains,
-    template?.match_heading_contains
-  ].filter(Boolean).join(' '));
-  return targets.some((target) => haystack.includes(normalizeText(target)));
+  const haystack = normalizeText([template?.page_type, template?.url_pattern, template?.name].filter(Boolean).join(' '));
+  return targets.some(target => haystack.includes(target));
 }
 
-function getHtmlPool(template = {}) {
-  const parts = [template?.html_preview || ''];
-  getAllTemplateElements(template).forEach((el) => { if (el?.html) parts.push(el.html); });
-  return parts.join('\n');
+function escapeHtml(value = '') {
+  return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
-function scoreElements(template = {}, keywords = [], options = {}) {
-  const elements = getAllTemplateElements(template);
-  const normalizedKeywords = [...new Set(keywords.map(normalizeText).filter(Boolean))];
-  const rejectWords = (options.rejectWords || []).map(normalizeText).filter(Boolean);
-  const preferWords = (options.preferWords || []).map(normalizeText).filter(Boolean);
-
-  return elements
-    .map((el) => {
-      const haystack = normalizeText([
-        el.key,
-        el.name,
-        el.type,
-        el.title,
-        el.text,
-        el.selector,
-        el.html
-      ].filter(Boolean).join(' '));
-
-      let score = 0;
-      normalizedKeywords.forEach((keyword) => {
-        if (haystack.includes(keyword)) score += 10;
-      });
-      preferWords.forEach((keyword) => {
-        if (haystack.includes(keyword)) score += 8;
-      });
-      rejectWords.forEach((keyword) => {
-        if (haystack.includes(keyword)) score -= 999;
-      });
-
-      return { el, score, haystack };
-    })
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
+function normalizeActivityType(value = '') {
+  const type = String(value || '').toLowerCase();
+  if (type === 'assignment') return 'assign';
+  if (['page', 'resource', 'book', 'url', 'folder'].includes(type)) return 'materi';
+  return type;
 }
 
-function toVisualAction(el, overrides = {}) {
-  if (!el?.html) return null;
+function isLearningTaskType(type = '') {
+  return ['assign', 'quiz', 'forum', 'materi'].includes(normalizeActivityType(type));
+}
+
+function getIntentTargetType(intent = '') {
+  const value = String(intent || '');
+  if (value.includes('quiz') || value.includes('kuis')) return 'quiz';
+  if (value.includes('forum')) return 'forum';
+  if (value.includes('tugas') || value.includes('assignment')) return 'assign';
+  return '';
+}
+
+function getIntentTargetLabel(intent = '') {
+  const type = getIntentTargetType(intent);
+  if (type === 'assign') return 'tugas';
+  if (type === 'quiz') return 'kuis';
+  if (type === 'forum') return 'forum';
+  return 'aktivitas';
+}
+
+
+function isAnnouncementForum(activity = {}) {
+  const type = normalizeActivityType(activity.type || activity.moodle_activity_type || activity.activity_type);
+  if (type !== 'forum') return false;
+  const title = normalizeText(activity.title || '');
+  const forumType = normalizeText(activity.forum_type || '');
+  return title === 'pengumuman' || forumType === 'news';
+}
+
+function withLinearContext(activity = {}, targetLabel = 'aktivitas') {
   return {
-    type: 'inline_visual',
-    label: overrides.label || el.title || el.name || 'Visual elemen halaman',
-    element_key: overrides.element_key || el.key || '',
-    selector: overrides.selector || el.selector || '',
-    html: overrides.html || el.html || '',
-    text: overrides.text || el.text || '',
-    element_type: overrides.element_type || el.type || '',
-    after_step: overrides.after_step || null
+    ...activity,
+    linear_context: true,
+    linear_context_label: `Prasyarat sebelum ${targetLabel}`
   };
 }
 
-function extractBlockByClass(html = '', className = '') {
-  if (!html || !className) return '';
-  const escaped = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(`<div\\b[^>]*class=["'][^"']*${escaped}[^"']*["'][^>]*>[\\s\\S]*?<\\/div>`, 'i');
-  return (String(html).match(regex) || [])[0] || '';
+function getTypeLabel(activity = {}) {
+  const type = normalizeActivityType(activity.type || activity.moodle_activity_type || activity.activity_type);
+  if (type === 'assign') return 'Tugas';
+  if (type === 'quiz') return 'Kuis';
+  if (type === 'forum') return 'Forum';
+  if (['page', 'resource', 'book', 'url', 'folder', 'label', 'materi'].includes(type)) return 'Materi';
+  return type ? type.toUpperCase() : 'Aktivitas';
 }
 
-function extractLoginInputHtml(formHtml = '') {
-  const username = extractBlockByClass(formHtml, 'login-form-username');
-  const password = extractBlockByClass(formHtml, 'login-form-password');
-  if (username || password) return `<div class="login-form">${username}${password}</div>`;
-  return formHtml;
+function getActionLabel(activity = {}) {
+  if (isLockedStatus(activity)) return 'Lihat di VClass';
+  const label = getTypeLabel(activity);
+  if (label === 'Tugas') return 'Kerjakan Sekarang';
+  if (label === 'Kuis') return 'Kerjakan Kuis';
+  if (label === 'Forum') return 'Jawab Forum';
+  if (label === 'Materi') return 'Buka Materi';
+  return 'Buka VClass';
+}
+function isLockedStatus(activity = {}) {
+  const status = String(activity.status || '').toLowerCase();
+  // Jangan pakai availability_info sebagai indikator tunggal.
+  // Pada Moodle linear, availability_info bisa tetap ada sebagai teks syarat,
+  // meski syaratnya sudah terpenuhi untuk siswa tersebut. Status final harus
+  // mengikuti hasil merge completion di lms-context.service.
+  return activity.is_available === false
+    || status.includes('terkunci')
+    || status.includes('belum terbuka')
+    || status.includes('belum bisa dibuka')
+    || status.includes('restricted')
+    || status.includes('not available');
+}
+function isIncompleteStatus(activity = {}) {
+  const status = String(activity.status || '').toLowerCase();
+  return isLockedStatus(activity) || status.includes('belum') || status.includes('not completed') || status.includes('incomplete') || activity.is_completed === false;
 }
 
-function extractLoginButtonHtml(formHtml = '') {
-  const submit = extractBlockByClass(formHtml, 'login-form-submit');
-  if (submit) return `<div class="login-form">${submit}</div>`;
-  const button = (String(formHtml).match(/<button\b[\s\S]*?<\/button>/i) || [])[0] || '';
-  return button ? `<div class="login-form">${button}</div>` : '';
+function isCompletedStatus(activity = {}) {
+  const status = String(activity.status || '').toLowerCase();
+  return !isLockedStatus(activity) && (status.includes('selesai') || status.includes('completed') || activity.is_completed === true);
 }
 
-function buildFocusedLoginVisualActions(loginTemplate) {
-  if (!loginTemplate || !isTemplateProbablyFor(loginTemplate, ['login', 'landing'])) return [];
+function formatDeadline(deadline) {
+  if (!deadline) {
+    return '<span class="alb-info-badge inline-flex items-center gap-1 rounded-full bg-slate-50 border border-slate-200 text-slate-600 px-2 py-1 text-[11px] font-semibold" title="Aktivitas ini tidak memiliki tanggal deadline yang ditulis secara spesifik di Moodle."><i class="fa-regular fa-clock"></i> Saat ini deadline belum tertulis spesifik</span>';
+  }
+  try {
+    return new Date(deadline).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  } catch (_) {
+    return escapeHtml(deadline);
+  }
+}
 
-  const loginEl = scoreElements(loginTemplate, ['form login utama', 'username', 'password', 'log in', 'login siswa'], {
-    rejectWords: ['guest access', 'cookies notice', 'access as a guest', 'login tamu'],
-    preferWords: ['username', 'password', 'login-form']
-  })[0]?.el;
+function dateKeyJakarta(value = new Date()) {
+  try {
+    return new Date(value).toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+  } catch (_) {
+    return new Date().toISOString().split('T')[0];
+  }
+}
 
-  if (!loginEl?.html) return [];
+function deadlineKey(deadline) {
+  if (!deadline) return '';
+  return dateKeyJakarta(deadline);
+}
 
-  const inputHtml = extractLoginInputHtml(loginEl.html);
-  const buttonHtml = extractLoginButtonHtml(loginEl.html);
-  const actions = [];
+function statusBadge(activity = {}) {
+  if (isLockedStatus(activity)) {
+    const info = activity.availability_info ? ` title="${escapeHtml(activity.availability_info)}"` : '';
+    return `<span class="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700 px-2 py-1 text-[11px] font-bold"${info}><i class="fa-solid fa-lock"></i> Belum terbuka</span>`;
+  }
+  if (isCompletedStatus(activity)) {
+    return '<span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 text-[11px] font-bold"><i class="fa-solid fa-check"></i> Selesai</span>';
+  }
+  if (isIncompleteStatus(activity)) {
+    return '<span class="inline-flex items-center gap-1 rounded-full bg-rose-50 border border-rose-200 text-rose-700 px-2 py-1 text-[11px] font-bold"><i class="fa-solid fa-circle-exclamation"></i> Belum selesai</span>';
+  }
+  return '<span class="inline-flex items-center gap-1 rounded-full bg-slate-50 border border-slate-200 text-slate-600 px-2 py-1 text-[11px] font-semibold" title="Status completion belum terbaca dari Moodle."><i class="fa-solid fa-circle-question"></i> Status belum terbaca</span>';
+}
+function typeBadge(activity = {}) {
+  const label = getTypeLabel(activity);
+  const type = normalizeActivityType(activity.type || activity.moodle_activity_type || activity.activity_type);
+  const classes = type === 'assign' ? 'bg-blue-50 text-blue-700 border-blue-200'
+    : type === 'quiz' ? 'bg-amber-50 text-amber-700 border-amber-200'
+    : type === 'forum' ? 'bg-violet-50 text-violet-700 border-violet-200'
+    : type === 'materi' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : 'bg-slate-50 text-slate-600 border-slate-200';
+  return `<span class="inline-flex items-center rounded-full border ${classes} px-2 py-1 text-[10px] font-bold uppercase">${escapeHtml(label)}</span>`;
+}
 
-  if (inputHtml) {
-    actions.push({
-      type: 'inline_visual',
-      label: 'Visual langkah 2: kolom username dan password',
-      element_key: `${loginEl.key || 'login'}_input_fields`,
-      selector: loginEl.selector || '',
-      html: inputHtml,
-      text: 'Cari bentuk kolom username/email dan password pada halaman login.',
-      element_type: 'Focused Visual',
-      after_step: 2
-    });
+function actionButtons(activity = {}) {
+  const locked = isLockedStatus(activity);
+  const activityUrl = activity.url || activity.activity_url || '';
+  const courseUrl = activity.course_url || activity.action_url || activityUrl || '';
+  const rawUrl = locked ? courseUrl : (activityUrl || courseUrl);
+  const hasUrl = rawUrl && rawUrl !== '#';
+  const url = escapeHtml(hasUrl ? rawUrl : '#');
+  const title = escapeHtml(activity.title || 'Aktivitas VClass');
+  const label = escapeHtml(getActionLabel(activity));
+  const pageType = locked ? 'course' : 'activity';
+
+  if (!hasUrl) {
+    return `
+      <div class="alb-task-actions" onclick="event.stopPropagation();" style="display:flex;flex-direction:row;align-items:center;gap:6px;flex-wrap:nowrap;">
+        <span style="display:inline-flex;align-items:center;gap:5px;padding:7px 11px;border-radius:8px;border:1px solid #e2e8f0;background:#f8fafc;color:#94a3b8;font-size:12px;font-weight:700;white-space:nowrap;">
+          <i class="fa-solid fa-link-slash"></i><span>Belum ada link</span>
+        </span>
+      </div>`;
   }
 
-  if (buttonHtml) {
-    actions.push({
-      type: 'inline_visual',
-      label: 'Visual langkah 4: tombol Log in',
-      element_key: `${loginEl.key || 'login'}_submit_button`,
-      selector: loginEl.selector || '',
-      html: buttonHtml,
-      text: 'Klik tombol ini setelah data login diisi.',
-      element_type: 'Focused Visual',
-      after_step: 4
-    });
+  return `
+    <div class="alb-task-actions" onclick="event.stopPropagation();" style="display:flex;flex-direction:row;align-items:center;gap:6px;flex-wrap:nowrap;">
+      <button type="button" class="btn-return-source alb-btn-vclass-primary" data-url="${url}" data-page-type="${pageType}" data-title="${title}" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:7px 12px;border-radius:8px;border:0;background:#0f172a;color:#ffffff;font-size:12px;font-weight:800;line-height:1.2;white-space:nowrap;cursor:pointer;">
+        <i class="fa-solid fa-eye"></i><span>${locked ? 'Lihat di VClass' : label}</span>
+      </button>
+      <a href="${url}" target="_blank" rel="noopener noreferrer" class="alb-btn-vclass-newtab" title="Buka di tab baru" style="display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border-radius:8px;border:1px solid #e2e8f0;background:#ffffff;color:#475569;font-size:13px;line-height:1;text-decoration:none;white-space:nowrap;">
+        <i class="fa-solid fa-up-right-from-square"></i>
+      </a>
+    </div>`;
+}
+
+function emptyStateHtml({ title, subtitle, actionUrl = '' }) {
+  const safeUrl = escapeHtml(actionUrl || '#');
+  return `
+    <details class="alb-html-block" open style="background:#fff;border:1px solid #e8ecf0;border-radius:16px;margin-top:14px;margin-bottom:8px;box-shadow:0 1px 4px rgba(0,0,0,.05);overflow:hidden;">
+      <summary style="display:none;">${escapeHtml(title)}</summary>
+      <div style="padding:28px 20px;text-align:center;">
+        <div style="width:52px;height:52px;margin:0 auto 14px;border-radius:50%;background:#f8fafc;border:1px solid #e2e8f0;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:22px;">
+          <i class="fa-regular fa-folder-open"></i>
+        </div>
+        <div style="font-size:15px;font-weight:800;color:#0f172a;margin-bottom:6px;line-height:1.35;">${escapeHtml(title)}</div>
+        <div style="font-size:13px;color:#64748b;max-width:380px;margin:0 auto;line-height:1.6;">${escapeHtml(subtitle)}</div>
+        ${actionUrl ? `<div style="margin-top:16px;"><button type="button" class="btn-return-source" data-url="${safeUrl}" data-title="Buka VClass" style="display:inline-flex;align-items:center;gap:6px;background:#0f172a;color:#fff;border:0;border-radius:999px;padding:9px 18px;font-size:13px;font-weight:800;cursor:pointer;"><i class="fa-solid fa-eye"></i> Cek Langsung di VClass</button></div>` : ''}
+      </div>
+    </details>`;
+}
+
+function stripTagsForDetail(value = '') {
+  return String(value || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildActivityDetailModal(act = {}, modalId = '') {
+  const title = escapeHtml(act.title || 'Aktivitas');
+  const type = escapeHtml(getTypeLabel(act));
+  const section = escapeHtml(act.section_name || '-');
+  const status = stripTagsForDetail(statusBadge(act));
+  const deadline = stripTagsForDetail(formatDeadline(act.deadline));
+  const availability = escapeHtml(act.availability_info || 'Tidak ada keterangan prasyarat khusus.');
+  const rule = escapeHtml(act.completion_rule || 'Belum ada aturan completion yang terbaca.');
+
+  return `
+    <div id="${modalId}" class="alb-mobile-detail-modal" onclick="event.stopPropagation(); if(event.target === this) this.style.display='none';" style="display:none;position:fixed;inset:0;z-index:999999;background:rgba(15,23,42,.45);align-items:center;justify-content:center;padding:18px;">
+      <div style="width:100%;max-width:360px;background:#fff;border-radius:18px;box-shadow:0 18px 48px rgba(15,23,42,.22);overflow:hidden;">
+        <div style="padding:14px 16px;border-bottom:1px solid #e5e7eb;display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+          <div>
+            <div style="font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">Detail Aktivitas</div>
+            <div style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.35;margin-top:2px;">${title}</div>
+          </div>
+          <button type="button" onclick="event.stopPropagation(); this.closest('.alb-mobile-detail-modal').style.display='none';" style="border:0;background:#f1f5f9;color:#334155;border-radius:999px;width:30px;height:30px;font-weight:900;cursor:pointer;">×</button>
+        </div>
+        <div style="padding:14px 16px;font-size:12px;color:#334155;line-height:1.55;">
+          <div><b>Jenis:</b> ${type}</div>
+          <div><b>Bagian:</b> ${section}</div>
+          <div><b>Status:</b> ${escapeHtml(status)}</div>
+          <div><b>Deadline:</b> ${escapeHtml(deadline)}</div>
+          <div style="margin-top:10px;padding:10px;border-radius:12px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;"><b>Info prasyarat:</b><br>${availability}</div>
+          <div style="margin-top:10px;padding:10px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0;color:#475569;"><b>Aturan selesai:</b><br>${rule}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function buildDeadlineOverlay(tableId = '') {
+  return `
+    <div class="alb-deadline-overlay" data-table-overlay="${tableId}" style="position:absolute;inset:0;background:rgba(255,255,255,.93);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:16px;z-index:5;border-radius:16px;">
+      <div style="max-width:400px;width:100%;text-align:center;border:1px solid #dbeafe;background:#fff;border-radius:16px;box-shadow:0 8px 24px rgba(15,23,42,.10);padding:20px 18px;">
+        <div style="width:48px;height:48px;margin:0 auto 12px;border-radius:50%;background:#eff6ff;border:1px solid #bfdbfe;color:#2563eb;display:flex;align-items:center;justify-content:center;font-size:20px;"><i class="fa-solid fa-calendar-days"></i></div>
+        <div style="font-size:14px;font-weight:800;color:#0f172a;margin-bottom:6px;line-height:1.4;">Deadline belum tertulis spesifik di Moodle</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;margin-bottom:14px;">Instruktur belum menetapkan tanggal deadline. Kamu tetap bisa melihat daftar aktivitas dan mengecek langsung di VClass.</div>
+        <button type="button" onclick="event.stopPropagation(); this.closest('.alb-deadline-overlay').style.display='none';" style="display:inline-flex;align-items:center;gap:6px;border:0;background:#0f172a;color:#fff;border-radius:999px;padding:9px 16px;font-size:12px;font-weight:800;cursor:pointer;letter-spacing:.01em;"><i class="fa-solid fa-list"></i> Lihat aktivitas</button>
+      </div>
+    </div>`;
+}
+
+function buildPaginationControls(tableId = '', totalPages = 1, totalRows = 0) {
+  const pageSize = 5;
+  const showing = Math.min(totalRows, pageSize);
+
+  if (totalPages <= 1) {
+    return `<div style="font-size:11px;color:#94a3b8;margin-top:8px;padding:0 2px;">Menampilkan ${showing} dari ${totalRows} aktivitas</div>`;
   }
 
-  return actions.slice(0, 2);
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;padding:0 2px;flex-wrap:wrap;gap:6px;">
+      <span style="font-size:11px;color:#94a3b8;font-weight:600;" data-page-info="${tableId}">Halaman 1 dari ${totalPages}</span>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <span style="font-size:11px;color:#94a3b8;">${totalRows} aktivitas</span>
+        <button type="button" class="alb-lms-page-btn" data-dir="-1" disabled style="border:1px solid #e2e8f0;background:#fff;border-radius:8px;padding:5px 11px;font-weight:800;cursor:pointer;font-size:14px;color:#475569;line-height:1;transition:background .15s;">‹</button>
+        <button type="button" class="alb-lms-page-btn" data-dir="1" style="border:1px solid #e2e8f0;background:#fff;border-radius:8px;padding:5px 11px;font-weight:800;cursor:pointer;font-size:14px;color:#475569;line-height:1;transition:background .15s;">›</button>
+      </div>
+    </div>`;
 }
 
-function buildDashboardCourseVisualActions(dashboardTemplate) {
-  if (!dashboardTemplate) return [];
-  const courseEl = scoreElements(dashboardTemplate, ['informatika', 'enter this course', 'kartu kursus', 'daftar kursus', 'course-card', 'coursename'], {
-    rejectWords: ['accessibility', 'skip links', 'abaikan ikhtisar'],
-    preferWords: ['informatika', 'enter this course', 'course-card']
-  })[0]?.el;
+function buildActivityTable(activities = [], options = {}) {
+  const tableId = `alb_lms_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const totalRows = activities.length;
+  const pageSize = Number(options.pageSize || 5);
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
 
-  const action = toVisualAction(courseEl, {
-    label: 'Visual langkah 2-3: kartu kursus Informatika',
-    text: 'Cari kartu kursus Informatika, lalu klik judul kursus atau tombol Enter this course.',
-    after_step: 2
-  });
-  return action ? [action] : [];
+  // --- Desktop table rows ---
+  const tableRows = activities.map((act, index) => {
+    const page = Math.floor(index / pageSize) + 1;
+    const modalId = `${tableId}_d_${index}`;
+    const hiddenStyle = page > 1 ? 'display:none;' : '';
+    return `
+    <tr data-alb-page="${page}" style="${hiddenStyle}border-bottom:1px solid #f1f5f9;">
+      <td style="padding:12px 14px;vertical-align:top;min-width:220px;max-width:260px;">
+        ${act.linear_context ? `<div style="display:inline-flex;align-items:center;gap:4px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:999px;padding:2px 8px;font-size:10px;font-weight:800;margin-bottom:6px;"><i class="fa-solid fa-route"></i> ${escapeHtml(act.linear_context_label || 'Prasyarat alur')}</div><br>` : ''}
+        <div style="font-weight:700;font-size:13px;color:#0f172a;line-height:1.4;margin-bottom:3px;">${escapeHtml(act.title || 'Aktivitas')}</div>
+        <div style="font-size:11px;color:#94a3b8;line-height:1.4;">${escapeHtml(act.course_name || act.class_code || '')}${act.section_name ? ` · ${escapeHtml(act.section_name)}` : ''}</div>
+        ${isLockedStatus(act) && act.availability_info ? `<div style="font-size:11px;color:#b45309;margin-top:4px;line-height:1.4;"><i class="fa-solid fa-lock" style="margin-right:3px;"></i>${escapeHtml(act.availability_info).slice(0, 120)}</div>` : ''}
+        ${buildActivityDetailModal(act, modalId)}
+      </td>
+      <td style="padding:12px 14px;vertical-align:top;white-space:nowrap;">${typeBadge(act)}</td>
+      <td style="padding:12px 14px;vertical-align:top;white-space:nowrap;font-size:12px;${act.deadline ? 'color:#dc2626;font-weight:700;' : 'color:#64748b;'}">${formatDeadline(act.deadline)}</td>
+      <td style="padding:12px 14px;vertical-align:top;white-space:nowrap;">${statusBadge(act)}</td>
+      <td style="padding:12px 14px;vertical-align:top;">${actionButtons(act)}</td>
+    </tr>`;
+  }).join('');
+
+  // --- Mobile card rows ---
+  const cardRows = activities.map((act, index) => {
+    const page = Math.floor(index / pageSize) + 1;
+    const modalId = `${tableId}_m_${index}`;
+    const hiddenStyle = page > 1 ? 'display:none;' : '';
+    const locked = isLockedStatus(act);
+    const activityUrl = act.url || act.activity_url || '';
+    const courseUrl = act.course_url || act.action_url || activityUrl || '';
+    const rawUrl = locked ? courseUrl : (activityUrl || courseUrl);
+    const hasUrl = rawUrl && rawUrl !== '#';
+    const url = escapeHtml(hasUrl ? rawUrl : '#');
+    const title = escapeHtml(act.title || 'Aktivitas VClass');
+    const pageType = locked ? 'course' : 'activity';
+    const actionLabel = escapeHtml(getActionLabel(act));
+    const deadlineText = act.deadline
+      ? formatDeadline(act.deadline).replace(/<[^>]*>/g, '').trim()
+      : 'Belum ada deadline';
+
+    return `
+    <div data-alb-page="${page}" style="${hiddenStyle}background:#fff;border:1px solid #e8ecf0;border-radius:16px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.06);">
+
+      <!-- Card header: title + type badge -->
+      <div style="padding:14px 14px 0 14px;">
+        ${act.linear_context ? `<div style="display:inline-flex;align-items:center;gap:4px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:999px;padding:2px 8px;font-size:10px;font-weight:800;margin-bottom:8px;"><i class="fa-solid fa-route"></i> ${escapeHtml(act.linear_context_label || 'Prasyarat')}</div><br>` : ''}
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:800;font-size:14px;color:#0f172a;line-height:1.4;word-break:break-word;">${escapeHtml(act.title || 'Aktivitas')}</div>
+            ${act.section_name ? `<div style="font-size:11px;color:#94a3b8;margin-top:3px;font-weight:500;">${escapeHtml(act.section_name)}</div>` : ''}
+          </div>
+          <div style="flex-shrink:0;padding-top:2px;">${typeBadge(act)}</div>
+        </div>
+      </div>
+
+      <!-- Divider rows: status & deadline -->
+      <div style="margin:12px 14px 0 14px;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;display:flex;flex-direction:column;gap:7px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;">Status</span>
+          ${statusBadge(act)}
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;">Deadline</span>
+          <span style="font-size:12px;font-weight:${act.deadline ? '700' : '500'};color:${act.deadline ? '#dc2626' : '#94a3b8'};display:inline-flex;align-items:center;gap:4px;text-align:right;">
+            ${act.deadline ? '<i class="fa-regular fa-clock"></i>' : ''} ${escapeHtml(deadlineText)}
+          </span>
+        </div>
+      </div>
+
+      <!-- Prerequisite info (only if locked) -->
+      ${isLockedStatus(act) && act.availability_info ? `
+      <div style="margin:0 14px;padding:9px 10px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;margin-top:10px;font-size:11px;color:#92400e;line-height:1.55;display:flex;align-items:flex-start;gap:6px;">
+        <i class="fa-solid fa-lock" style="flex-shrink:0;margin-top:1px;"></i>
+        <span>${escapeHtml(act.availability_info).slice(0, 160)}</span>
+      </div>` : ''}
+
+      <!-- Action buttons row -->
+      <div style="padding:12px 14px 14px 14px;display:flex;align-items:center;gap:8px;">
+        ${hasUrl ? `
+          <button type="button" class="btn-return-source alb-btn-vclass-primary" data-url="${url}" data-page-type="${pageType}" data-title="${title}"
+            style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 14px;border-radius:10px;border:0;background:#0f172a;color:#fff;font-size:13px;font-weight:800;cursor:pointer;min-width:0;">
+            <i class="fa-solid fa-eye"></i><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${locked ? 'Lihat di VClass' : actionLabel}</span>
+          </button>
+          <a href="${url}" target="_blank" rel="noopener noreferrer" title="Buka tab baru"
+            style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;border:1px solid #e2e8f0;background:#fff;color:#475569;text-decoration:none;font-size:14px;">
+            <i class="fa-solid fa-up-right-from-square"></i>
+          </a>` : `
+          <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 14px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;color:#94a3b8;font-size:13px;font-weight:600;">
+            <i class="fa-solid fa-link-slash"></i> Belum ada link
+          </span>`}
+        <button type="button" onclick="event.stopPropagation(); var m=document.getElementById('${modalId}'); if(m) m.style.display='flex';"
+          style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;color:#475569;font-size:14px;cursor:pointer;" title="Lihat detail">
+          <i class="fa-solid fa-circle-info"></i>
+        </button>
+        ${buildActivityDetailModal(act, modalId)}
+      </div>
+    </div>`;
+  }).join('');
+
+  return `
+    <details class="alb-html-block alb-lms-render-block" open>
+      <summary class="hidden">Daftar aktivitas LMS</summary>
+      <style>
+        .alb-lms-outer{position:relative;margin-top:14px;margin-bottom:6px;}
+        .alb-lms-desktop{display:block;}
+        .alb-lms-mobile{display:none;}
+        @media (max-width:680px){
+          .alb-lms-desktop{display:none!important;}
+          .alb-lms-mobile{display:block!important;}
+        }
+        .alb-lms-th{padding:10px 14px;font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;background:#f8fafc;}
+        .alb-lms-table tr:hover td{background:#fafbfc;}
+      </style>
+      <div class="alb-lms-outer" data-alb-lms-table="${tableId}" data-page="1" data-total-pages="${totalPages}">
+
+        <!-- Desktop table -->
+        <div class="alb-lms-desktop" style="border:1px solid #e8ecf0;border-radius:16px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06);">
+          <div style="overflow-x:auto;">
+            <table class="alb-lms-table" style="width:100%;border-collapse:collapse;font-size:13px;background:#fff;margin:0;">
+              <thead>
+                <tr style="border-bottom:2px solid #e8ecf0;">
+                  <th class="alb-lms-th" style="text-align:left;border-radius:0;">Aktivitas</th>
+                  <th class="alb-lms-th" style="text-align:left;">Jenis</th>
+                  <th class="alb-lms-th" style="text-align:left;">Deadline</th>
+                  <th class="alb-lms-th" style="text-align:left;">Status</th>
+                  <th class="alb-lms-th" style="text-align:left;border-radius:0;">Aksi</th>
+                </tr>
+              </thead>
+              <tbody>${tableRows}</tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Mobile cards -->
+        <div class="alb-lms-mobile">${cardRows}</div>
+
+        ${options.deadlineGate ? buildDeadlineOverlay(tableId) : ''}
+        ${buildPaginationControls(tableId, totalPages, totalRows)}
+      </div>
+    </details>`;
 }
 
-function buildCourseMaterialVisualActions(courseTemplate) {
-  if (!courseTemplate) return [];
-  const materialEl = scoreElements(courseTemplate, ['materi', 'modul', 'pdf', 'dokumen', 'resource', 'aktivitas', 'kisi kisi', 'informatika', 'instancename'], {
-    rejectWords: ['accessibility', 'skip links', 'abaikan'],
-    preferWords: ['activity', 'activityname', 'instancename', 'modtype_page', 'modtype_resource', 'kisi kisi', 'informatika']
-  })[0]?.el;
+function filterByIntent(activities = [], intent, progressAvailable = false) {
+  const normalized = (activities || [])
+    .filter(Boolean)
+    .filter((act) => act.is_visible !== false)
+    .sort((a, b) => Number(a.sequence_order || 9999) - Number(b.sequence_order || 9999));
 
-  const action = toVisualAction(materialEl, {
-    label: 'Visual langkah 4: contoh item materi di dalam kursus',
-    text: 'Klik judul materi/modul yang diminta guru pada daftar aktivitas kursus.',
-    after_step: 4
-  });
-  return action ? [action] : [];
-}
+  if (intent === 'cek_aktivitas_course') return normalized;
 
-function buildInlineVisualActions({ matchedTemplate, intent = '', keywords = [], limit = 2 }) {
-  if (!matchedTemplate) return [];
-  const scored = scoreElements(matchedTemplate, keywords, {
-    rejectWords: ['guest access', 'cookies notice', 'accessibility', 'skip links', 'abaikan'],
-    preferWords: keywords
-  });
-
-  const used = new Set();
-  const actions = [];
-  scored.forEach(({ el }) => {
-    const key = el.key || el.selector || el.title || el.name || el.text;
-    if (!key || used.has(key)) return;
-    used.add(key);
-    const action = toVisualAction(el, { label: el.title || el.name || 'Visual elemen halaman' });
-    if (action) actions.push(action);
-  });
-  return actions.slice(0, limit);
-}
-
-function buildFeedbackActions(message) {
-  const originalQuestion = cleanFeedbackPrompt(message || '');
-  return [
-    {
-      type: 'system_feedback_ok',
-      label: 'Sudah menyelesaikan masalah'
-    },
-    {
-      type: 'system_feedback_ai',
-      label: 'Belum, jelaskan dengan AI',
-      // Simpan pertanyaan asli saja. Jangan simpan prefix panjang agar tidak berulang.
-      prompt: originalQuestion
-    }
-  ];
-}
-
-function buildDashboardCourseResponse({ message, pageContext, matchedTemplate, templateMap }) {
-  const dashboardTemplate = templateMap?.dashboard || matchedTemplate;
-  const pageType = normalizeText(pageContext?.pageType || pageContext?.type || dashboardTemplate?.page_type || '');
-  const templateName = dashboardTemplate?.template_name || '';
-  const htmlPool = getHtmlPool(dashboardTemplate);
-  const hasSearchInput = /searchinput-courses|cari kursus|placeholder=["']cari/i.test(htmlPool);
-  const courseEl = scoreElements(dashboardTemplate, ['informatika', 'enter this course', 'kartu kursus', 'course-card', 'coursename'], {
-    rejectWords: ['accessibility', 'skip links']
-  })[0]?.el;
-
-  let courseName = 'Informatika';
-  const courseText = courseEl?.text || '';
-  const nameMatch = courseText.match(/Informatika\s+[0-9A-Z]+(?:\s*-\s*[A-Za-z\s.]+)?/i);
-  if (nameMatch) courseName = nameMatch[0].replace(/\s+/g, ' ').trim();
-
-  const isDashboard = pageType.includes('dashboard') || pageType.includes('my') || normalizeText(templateName).includes('dashboard') || normalizeText(templateName).includes('kursus');
-
-  let text = '';
-  if (isDashboard) {
-    text = `Baik, kamu perlu masuk dulu ke kursus **${courseName}** dari dashboard.\n\nLangkah 1:\nLihat bagian **Ikhtisar kursus / Kursus Saya** pada halaman dashboard.`;
-    if (hasSearchInput) {
-      text += `\n\nLangkah 2:\nKalau ada kolom **Cari**, ketik **Informatika** di kolom pencarian kursus.`;
-    } else {
-      text += `\n\nLangkah 2:\nCari kartu kursus yang namanya mengandung kata **Informatika**.`;
-    }
-    text += `\n\nLangkah 3:\nKlik judul kursus **${courseName}** atau tombol **Enter this course**.\n\nLangkah 4:\nSetelah masuk kursus, baru cari bagian **Materi**, **Modul**, **PDF**, atau aktivitas yang diberikan guru.`;
-  } else {
-    text = `Baik, untuk masuk ke kursus Informatika dari halaman mana pun, ikuti langkah ini:\n\nLangkah 1:\nBuka halaman **Dashboard / Kursus Saya**.\n\nLangkah 2:\nCari kartu kursus yang namanya mengandung kata **Informatika**.\n\nLangkah 3:\nKlik judul kursus Informatika atau tombol **Enter this course**.\n\nLangkah 4:\nSetelah masuk kursus, cari bagian **Materi**, **Modul**, atau aktivitas yang diberikan guru.`;
+  if (intent === 'cek_deadline_hari_ini') {
+    const today = dateKeyJakarta();
+    return normalized
+      .filter((act) => act.deadline && deadlineKey(act.deadline) === today)
+      .filter((act) => !isCompletedStatus(act))
+      .sort((a, b) => new Date(a.deadline) - new Date(b.deadline));
   }
 
-  const actions = [
-    {
-      type: 'return_to_source',
-      label: 'Buka dashboard / kursus saya',
-      pageType: 'dashboard',
-      url: 'https://lms.smpn167jakarta.sch.id/my/courses.php'
-    },
-    ...buildDashboardCourseVisualActions(dashboardTemplate),
-    ...buildFeedbackActions(message)
-  ];
+  if (intent === 'cek_deadline_terdekat') {
+    return normalized
+      .filter((act) => act.deadline)
+      .filter((act) => !isCompletedStatus(act))
+      .sort((a, b) => new Date(a.deadline) - new Date(b.deadline))
+      .slice(0, 10);
+  }
 
-  return { text, actions, strict: true, allowAiFallback: true };
+  const targetType = getIntentTargetType(intent);
+  if (!targetType) return normalized;
+
+  let targetActivities = normalized.filter((act) => {
+    const type = normalizeActivityType(act.type || act.moodle_activity_type || act.activity_type);
+    if (type !== targetType) return false;
+    if (targetType === 'forum' && isAnnouncementForum(act)) return false;
+    return true;
+  });
+
+  // Untuk menu "belum dikerjakan", sembunyikan yang sudah selesai jika completion tersedia.
+  // Modul yang terkunci tetap ditampilkan karena statusnya belum terbuka dan masih relevan.
+  if (progressAvailable) {
+    targetActivities = targetActivities.filter((act) => !isCompletedStatus(act));
+  }
+
+  const byKey = new Map();
+  targetActivities.forEach((act) => {
+    const key = `${act.course_id || ''}:${act.module_id || ''}:${act.title || ''}:${normalizeActivityType(act.type || act.moodle_activity_type || act.activity_type)}`;
+    if (!byKey.has(key)) byKey.set(key, act);
+  });
+
+  return Array.from(byKey.values()).slice(0, 50);
 }
-
-function buildLoginResponse({ message, matchedTemplate, templateMap }) {
-  const loginTemplate = templateMap?.login || matchedTemplate;
-  const actions = [
-    {
-      type: 'return_to_source',
-      label: 'Buka halaman login',
-      pageType: 'login',
-      url: 'https://lms.smpn167jakarta.sch.id/login/index.php'
-    },
-    ...buildFocusedLoginVisualActions(loginTemplate),
-    ...buildFeedbackActions(message)
-  ];
-
-  const text = `Untuk login ke VClass, ikuti langkah ini:\n\nLangkah 1:\nKlik tombol **Login** atau buka halaman login VClass.\n\nLangkah 2:\nMasukkan **email/username** dan **password** yang diberikan guru atau sekolah.\n\nLangkah 3:\nCek lagi huruf besar-kecil pada username dan password.\n\nLangkah 4:\nKlik tombol **Log in / Login / Masuk**.\n\nCatatan:\nKalau gagal login, kemungkinan username atau password belum tepat. Coba cek kembali penulisannya.`;
-
-  return { text, actions, strict: true, allowAiFallback: true };
-}
-
-function buildMaterialResponse({ message, matchedTemplate, templateMap }) {
-  const dashboardTemplate = templateMap?.dashboard;
-  const courseTemplate = templateMap?.course || matchedTemplate;
-
-  const actions = [
-    {
-      type: 'return_to_source',
-      label: 'Buka dashboard / kursus saya',
-      pageType: 'dashboard',
-      url: 'https://lms.smpn167jakarta.sch.id/my/courses.php'
-    },
-    {
-      type: 'return_to_source',
-      label: 'Buka halaman kursus Informatika',
-      pageType: 'course',
-      url: 'https://lms.smpn167jakarta.sch.id/course/view.php?id=2'
-    },
-    ...buildDashboardCourseVisualActions(dashboardTemplate),
-    ...buildCourseMaterialVisualActions(courseTemplate),
-    ...buildFeedbackActions(message)
-  ];
-
-  const text = `Untuk mengakses materi setelah login, ikuti alurnya pelan-pelan:\n\nLangkah 1:\nBuka halaman **Dashboard / Kursus Saya**.\n\nLangkah 2:\nCari dan masuk ke kursus **Informatika**. Biasanya kamu bisa klik judul kursus atau tombol **Enter this course**.\n\nLangkah 3:\nSetelah halaman kursus terbuka, scroll dan perhatikan daftar topik/aktivitas di dalam kursus.\n\nLangkah 4:\nCari judul yang berbentuk **Materi**, **Modul**, **PDF**, **Dokumen**, atau nama aktivitas yang diberikan guru, lalu klik judulnya.\n\nCatatan:\nKalau materinya belum terlihat, scroll dari atas ke bawah karena materi bisa berada di bagian minggu/topik tertentu.`;
-
-  return { text, actions, strict: true, allowAiFallback: true };
-}
-
-function buildTaskResponse({ message, matchedTemplate }) {
-  const actions = [
-    ...buildInlineVisualActions({
-      matchedTemplate,
-      intent: 'bantuan_tugas',
-      keywords: ['tugas', 'assignment', 'upload', 'submit', 'kumpul', 'pengumpulan'],
-      limit: 2
-    }),
-    ...buildFeedbackActions(message)
-  ];
-  const text = `Untuk melihat atau mengumpulkan tugas, ikuti langkah ini:\n\nLangkah 1:\nMasuk dulu ke kursus yang benar.\n\nLangkah 2:\nCari aktivitas yang bertuliskan **Tugas**, **Assignment**, **Upload**, atau **Pengumpulan**.\n\nLangkah 3:\nKlik judul tugas tersebut.\n\nLangkah 4:\nIkuti instruksi guru, lalu unggah file atau isi jawaban sesuai perintah.`;
-  return { text, actions, strict: true, allowAiFallback: true };
+function getLmsDebugNote(lmsContext = {}) {
+  const source = lmsContext.source || 'database';
+  const count = (lmsContext.activities || []).length;
+  const progress = lmsContext.progress_available ? 'completion aktif' : 'completion belum terbaca';
+  return `\n\n<span class="text-[12px] text-muted-soft">Sumber: ${escapeHtml(source)} • ${count} aktivitas terbaca • ${escapeHtml(progress)}</span>`;
 }
 
 const systemResponseService = {
-  buildSystemResponse({
-    message,
-    intent,
-    moderationResult,
-    retrievalResults,
-    pageContext,
-    elementContext,
-    aiUsage,
-    matchedTemplate,
-    templateMap,
-    burnoutCount = 0,
-    isErrorFallback = false,
-    fallbackType = 'error'
-  }) {
-    let text = 'Maaf, instruksi spesifik tidak ditemukan dan AI sedang sibuk. Coba tanyakan hal lain.';
+  buildSystemResponse({ message, intent, moderationResult, retrievalResults, pageContext, elementContext, aiUsage, matchedTemplate, templateMap, burnoutCount = 0, isErrorFallback = false, fallbackType = 'error', lmsContext = null }) {
+    let text = '';
     let actions = [];
-    let strict = false;
-    let allowAiFallback = false;
 
-    if (retrievalResults && retrievalResults.length > 0) {
-      const uniqueUrls = new Set();
-      retrievalResults.forEach(r => {
-        if (r.metadata?.file_url && !uniqueUrls.has(r.metadata.file_url)) {
-          uniqueUrls.add(r.metadata.file_url);
-          actions.push({
-            type: 'open_pdf_viewer',
-            label: `Buka ${r.title || 'Materi'}`,
-            url: r.metadata.file_url,
-            page_number: r.metadata.page_number || r.metadata.page || 1,
-            query: message,
-            highlight_text: r.metadata.highlight_text || r.content || '',
-            chunk_id: r.metadata.chunk_id || null,
-            chunk_index: r.metadata.chunk_index || null,
-            document_id: r.metadata.document_id || null
-          });
-        }
-      });
-    }
-
-    if (moderationResult?.isFlagged) {
-      if (['hate_speech', 'profanity'].includes(moderationResult.type)) {
-        text = moderationResult.responseMessage || 'Tolong gunakan bahasa yang sopan ya.';
-        return { text, actions: [], strict: true, allowAiFallback: false };
-      }
-      if (moderationResult.type === 'mental_health') {
-        intent = 'bantuan_burnout';
-      }
-    }
-
-    if (intent === 'minta_jawaban_langsung' || intent === 'quiz_answer_request') {
-      text = 'Aku tidak bisa memberikan jawaban langsung. Tapi coba baca materi yang berkaitan lalu cocokkan dengan pertanyaannya.';
-      if (retrievalResults?.length > 0) text += `\n\nCek bagian: *${retrievalResults[0].title}*`;
+    if (moderationResult?.flagged) {
+      text = 'Maaf, aku tidak bisa memproses pesan yang mengandung kata-kata kasar atau tidak pantas. Yuk, kita gunakan bahasa yang lebih baik! 😊';
       return { text, actions, strict: true, allowAiFallback: false };
     }
 
-    if (intent === 'navigasi_kursus' || intent === 'bantuan_dashboard') {
-      return buildDashboardCourseResponse({ message, pageContext, matchedTemplate, templateMap });
-    }
-
-    if (intent === 'akses_materi') {
-      return buildMaterialResponse({ message, matchedTemplate, templateMap });
-    }
-
-    if (intent === 'bantuan_login') {
-      return buildLoginResponse({ message, matchedTemplate, templateMap });
-    }
-
-    if (intent === 'bantuan_tugas') {
-      return buildTaskResponse({ message, matchedTemplate });
-    }
-
-    if (intent === 'out_of_context') {
-      text = 'Maaf ya, aku hanya difokuskan untuk membantu pembelajaran materi dan penggunaan VClass. Yuk, kita kembali ke topik pelajaran!';
-      return { text, actions: [], strict: true, allowAiFallback: false };
-    }
-
     if (intent === 'bantuan_burnout') {
-      text = 'Aku paham kamu mulai capek atau kewalahan. Istirahat sebentar dulu ya: minum air putih, tarik napas pelan, lalu lanjutkan sedikit demi sedikit.';
-      if (burnoutCount >= 3) {
-        text += '\n\nKarena kamu sudah beberapa kali terlihat sangat kesulitan, kamu boleh minta bantuan guru.';
-        actions.push({
-          type: 'wa_teacher',
-          label: 'Hubungi Guru',
-          url: 'https://api.whatsapp.com/send/?phone=628989807094&text=Halo%20Instruktur%2C%20saya%20butuh%20bantuan.'
-        });
-      } else {
-        text += `\n\nAku belum akan menampilkan tombol Hubungi Guru dulu. Coba tulis bagian mana yang bikin kamu kesulitan. (${burnoutCount}/3)`;
-      }
+      if (burnoutCount === 1) text = 'Kamu terlihat lelah atau kesulitan. Jangan dipaksakan ya, istirahat dulu 5-10 menit. Minum air putih atau jalan-jalan sebentar. Belajar pas otak fresh bakal jauh lebih masuk! Semangat! 💪';
+      else if (burnoutCount === 2) text = 'Tarik napas panjang... Hembuskan... 🌬️\nMateri ini memang lumayan menantang. Kamu bisa coba ubah cara belajarmu, misalnya baca pelan-pelan sambil catat poin pentingnya. Kalau masih mentok, tanya aku lagi bagian mana yang spesifik bikin kamu bingung.';
+      else text = `Kayaknya kamu udah mentok banget nih. Lebih baik kita langsung tanya ke ahlinya aja yuk! Klik tombol Hubungi Guru dulu. Coba tulis bagian mana yang bikin kamu kesulitan. (${burnoutCount}/3)`;
       return { text, actions, strict: true, allowAiFallback: true };
     }
 
     if (intent === 'hubungi_guru') {
-      text = 'Baik, kalau kamu memang ingin meminta bantuan guru, isi form bantuan berikut dengan singkat dan jelas.';
-      actions.push({
-        type: 'wa_teacher',
-        label: 'Hubungi Guru',
-        url: 'https://api.whatsapp.com/send/?phone=628989807094&text=Halo%20Instruktur%2C%20saya%20butuh%20bantuan.'
-      });
+      text = 'Baik, kalau kamu memang ingin meminta bantuan guru, klik tombol berikut untuk menghubungi instruktur/guru via WhatsApp secara langsung.';
+      actions.push({ type: 'wa_teacher', label: 'Hubungi Guru', url: 'https://api.whatsapp.com/send/?phone=628989807094&text=Halo%20Instruktur%2C%20saya%20butuh%20bantuan.' });
+      return { text, actions, strict: true, allowAiFallback: false };
+    }
+
+    const lmsIntents = ['cek_course_saya', 'cek_pengajar_course', 'cek_aktivitas_course', 'cek_tugas_belum_selesai', 'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_deadline_hari_ini', 'cek_deadline_terdekat', 'buka_aktivitas'];
+
+    if (lmsIntents.includes(intent)) {
+      if (!lmsContext || !lmsContext.course?.course_name) {
+        if (lmsContext && lmsContext.hasConfig) {
+          text = emptyStateHtml({ title: 'Kelas atau course belum terdeteksi', subtitle: 'Buka AI dari halaman course VClass atau verifikasi email siswa terlebih dahulu supaya sistem tahu course yang kamu ikuti.' });
+        } else {
+          text = emptyStateHtml({ title: 'Konfigurasi Moodle belum tersedia', subtitle: 'Instruktur perlu memasukkan endpoint dan token Moodle dari dashboard terlebih dahulu.' });
+        }
+        return { text, actions, strict: true, allowAiFallback: false };
+      }
+
+      const courses = Array.isArray(lmsContext.courses) && lmsContext.courses.length ? lmsContext.courses : [lmsContext.course];
+      const studentName = lmsContext.student?.name || 'Siswa';
+      const verified = lmsContext.student?.moodle_user_id ? 'terverifikasi dari Moodle' : 'belum terverifikasi';
+
+      if (intent === 'cek_course_saya') {
+        const courseList = courses.map((course) => `- **${course.class_code || '-'}**: ${course.course_name || course.course_title || 'Course'}${course.course_url ? `\n  ${course.course_url}` : ''}`).join('\n');
+        text = `Identitas sesi: **${studentName}** (${verified}).\n\nCourse yang terdeteksi:\n${courseList}`;
+        if (lmsContext.course.course_url) actions.push({ type: 'navigate', label: 'Buka Course Utama', url: lmsContext.course.course_url });
+        return { text, actions, strict: true, allowAiFallback: false };
+      }
+
+      if (intent === 'cek_pengajar_course') {
+        const teachers = courses.map((course) => `- ${course.course_name || course.course_title || 'Course'}: **${course.teacher_name || 'Belum tercatat'}**`).join('\n');
+        text = `Berikut data pengajar yang tercatat:\n${teachers}`;
+        return { text, actions, strict: true, allowAiFallback: false };
+      }
+
+      if (intent === 'buka_aktivitas') {
+        const keyword = String(message || '').replace(/(buka|tampilkan|lihat|dong|tolong)/gi, '').trim().toLowerCase();
+        const match = (lmsContext.activities || []).find(a => String(a.title || '').toLowerCase().includes(keyword));
+        if (match) {
+          text = `Ini dia aktivitas **${match.title}** yang kamu cari.\n${buildActivityTable([match])}`;
+        } else {
+          text = emptyStateHtml({ title: 'Aktivitas tidak ditemukan', subtitle: `Aku belum menemukan aktivitas yang cocok dengan kata kunci "${keyword}" di course yang terdeteksi.`, actionUrl: lmsContext.course.course_url });
+        }
+        return { text, actions, strict: true, allowAiFallback: false };
+      }
+
+      let tableActivities = filterByIntent(lmsContext.activities || [], intent, Boolean(lmsContext.progress_available));
+      let deadlineGate = false;
+      if ((intent === 'cek_deadline_hari_ini' || intent === 'cek_deadline_terdekat') && tableActivities.length === 0) {
+        tableActivities = (lmsContext.activities || [])
+          .filter((act) => act.is_visible !== false)
+          .filter((act) => isLearningTaskType(act.type || act.moodle_activity_type || act.activity_type))
+          .filter((act) => !isCompletedStatus(act))
+          .sort((a, b) => Number(a.sequence_order || 9999) - Number(b.sequence_order || 9999))
+          .slice(0, 50);
+        deadlineGate = tableActivities.length > 0;
+      }
+      let prefixMessage = '';
+
+      if (intent === 'cek_aktivitas_course') {
+        prefixMessage = `Berikut aktivitas yang tercatat untuk course kamu${courses.length > 1 ? ' di beberapa kelas/course' : `: **${lmsContext.course.course_name}**`}.`;
+      } else if (intent === 'cek_deadline_hari_ini') {
+        prefixMessage = deadlineGate ? 'Saat ini deadline belum tertulis secara spesifik di Moodle. Aku tetap tampilkan aktivitas yang masih perlu dicek.' : (tableActivities.length ? 'Berikut deadline yang tercatat untuk hari ini.' : '');
+      } else if (intent === 'cek_deadline_terdekat') {
+        prefixMessage = deadlineGate ? 'Saat ini deadline belum tertulis secara spesifik di Moodle. Aku tetap tampilkan aktivitas yang masih perlu dicek.' : (tableActivities.length ? 'Berikut deadline terdekat yang tercatat.' : '');
+      } else {
+        const typeName = intent.includes('quiz') ? 'kuis' : intent.includes('forum') ? 'forum' : 'tugas';
+        prefixMessage = lmsContext.progress_available
+          ? `Berikut daftar ${typeName} yang **belum selesai atau belum terbuka** di course ini. Modul yang belum terbuka tetap ditampilkan agar kamu tahu urutan yang harus diselesaikan.`
+          : `Status completion siswa belum sepenuhnya terbaca. Aku tampilkan ${typeName} yang tercatat dari course Moodle.`;
+      }
+
+      if (tableActivities.length > 0) {
+        let conclusion = '';
+        if (intent.includes('deadline')) {
+          const nearest = tableActivities.filter(a => a.deadline).sort((a, b) => new Date(a.deadline) - new Date(b.deadline))[0];
+          if (nearest) conclusion = `\n\n**Kesimpulan:** deadline paling dekat adalah **${nearest.title}** (${formatDeadline(nearest.deadline).replace(/<[^>]*>/g, '')}).`;
+        }
+        text = `${prefixMessage}\n${buildActivityTable(tableActivities, { deadlineGate })}${conclusion}`;
+      } else {
+        const courseUrl = lmsContext.course?.course_url || courses[0]?.course_url || '';
+        if (intent === 'cek_deadline_hari_ini') {
+          text = emptyStateHtml({
+            title: 'Tidak ada deadline hari ini',
+            subtitle: `Sistem tidak menemukan deadline yang jatuh hari ini pada course ${lmsContext.course?.course_name || 'yang terdeteksi'}.`,
+            actionUrl: courseUrl
+          });
+        } else if (intent === 'cek_deadline_terdekat') {
+          text = emptyStateHtml({
+            title: 'Belum ada deadline mendatang',
+            subtitle: `Sistem belum menemukan deadline mendatang pada course ${lmsContext.course?.course_name || 'yang terdeteksi'}.`,
+            actionUrl: courseUrl
+          });
+        } else {
+          const hasAnyActivityInCourse = (lmsContext.activities || []).length > 0;
+          if (intent === 'cek_tugas_belum_selesai') {
+            const subtitle = hasAnyActivityInCourse
+              ? (lmsContext.progress_available
+                ? `Semua aktivitas yang terbaca pada course ${lmsContext.course?.course_name || 'ini'} sudah selesai. Jika di VClass masih terkunci, biasanya syarat penyelesaian materi/forum sebelumnya belum terpenuhi atau completion belum sinkron.`
+                : `Aktivitas course terbaca, tetapi status completion siswa belum tersedia dari Moodle. Silakan cek urutan aktivitas di VClass.`)
+              : `Sistem belum menemukan aktivitas pada course ${lmsContext.course?.course_name || 'ini'}. Coba sinkronisasi course di dashboard jika data baru ditambahkan guru.`;
+            text = emptyStateHtml({ title: hasAnyActivityInCourse ? 'Tidak ada tugas belum selesai' : 'Tugas tidak ditemukan', subtitle, actionUrl: courseUrl });
+          } else {
+            const typeName = intent.includes('quiz') ? 'kuis' : intent.includes('forum') ? 'forum' : 'tugas';
+            const typeTitle = typeName.charAt(0).toUpperCase() + typeName.slice(1);
+            const hasTargetActivity = (lmsContext.activities || []).some((act) => normalizeActivityType(act.type || act.moodle_activity_type || act.activity_type) === getIntentTargetType(intent));
+            const pendingLinear = (lmsContext.activities || [])
+              .filter((act) => isLearningTaskType(act.type || act.moodle_activity_type || act.activity_type))
+              .filter((act) => !isCompletedStatus(act))
+              .slice(0, 3);
+
+            const subtitle = hasAnyActivityInCourse
+              ? (hasTargetActivity
+                ? `Semua ${typeName} yang terbaca pada course ${lmsContext.course?.course_name || 'ini'} sudah selesai.`
+                : `Sistem belum menemukan ${typeName} pada course ${lmsContext.course?.course_name || 'ini'}. Coba jalankan sinkronisasi course atau cek kembali data dari Moodle API.`)
+              : `Sistem belum menemukan aktivitas pada course ${lmsContext.course?.course_name || 'ini'}. Coba sinkronisasi course di dashboard jika data baru ditambahkan guru.`;
+            text = emptyStateHtml({ title: hasTargetActivity ? `${typeTitle} sudah selesai` : `${typeTitle} tidak ditemukan`, subtitle, actionUrl: courseUrl });
+          }
+        }
+      }
+
       return { text, actions, strict: true, allowAiFallback: false };
     }
 
     if (!aiUsage?.canUseAI || isErrorFallback) {
       let reason = 'sedang cooldown sebentar';
-      if (isErrorFallback) {
-        if (fallbackType === 'quota') reason = 'telah mencapai batas kuota harian';
-        else reason = 'sedang mengalami kendala teknis / jaringan';
-      }
-
+      if (isErrorFallback) reason = fallbackType === 'quota' ? 'telah mencapai batas kuota harian' : 'sedang mengalami kendala teknis / jaringan';
       if (retrievalResults?.length > 0) {
         text = `AI ${reason}. Berikut referensi dari database yang mungkin membantu:\n\n`;
-        retrievalResults.slice(0, 3).forEach((r) => {
-          text += `[ACCORDION=${r.title || 'Materi / FAQ'}]\n${r.content}\n[/ACCORDION]\n`;
-        });
-      } else {
-        text = `AI ${reason}. Maaf, saat ini aku belum menemukan materi spesifik tentang pertanyaanmu di database.`;
-      }
-      strict = true;
-      allowAiFallback = false;
+        retrievalResults.slice(0, 3).forEach((r) => { text += `[ACCORDION=${r.title || 'Materi / FAQ'}]\n${r.content}\n[/ACCORDION]\n`; });
+      } else text = `AI ${reason}. Maaf, saat ini aku belum bisa memberikan jawaban panjang. Coba lagi dalam beberapa saat ya!`;
+      return { text, actions, strict: true, allowAiFallback: false };
     }
 
-    return { text, actions, strict, allowAiFallback };
+    return { text: null, actions: [], strict: false, allowAiFallback: true };
   }
 };
 

@@ -9,28 +9,14 @@ try {
 }
 
 const ALLOWED_INTENTS = [
-  'bantuan_login',
-  'navigasi_kursus',
-  'akses_materi',
-  'bantuan_tugas',
-  'bantuan_kuis',
-  'bantuan_dashboard',
-  'penjelasan_materi',
-  'minta_jawaban_langsung',
-  'hubungi_guru',
-  'bantuan_burnout',
-  'out_of_context',
-  'general_learning_help',
-  'bantuan_umum',
-  'bantuan_lupa_password',
-  'bantuan_buka_materi',
-  'bantuan_kumpul_tugas',
-  'bantuan_quiz',
-  'bantuan_forum',
-  'bantuan_lihat_nilai',
-  'tanya_deadline',
-  'cek_tugas_belum',
-  'tutorial_steps'
+  'bantuan_login', 'navigasi_kursus', 'akses_materi', 'bantuan_tugas', 'bantuan_kuis', 'bantuan_dashboard',
+  'penjelasan_materi', 'minta_jawaban_langsung', 'hubungi_guru', 'bantuan_burnout', 'out_of_context',
+  'general_learning_help', 'bantuan_umum', 'bantuan_lupa_password', 'bantuan_buka_materi',
+  'bantuan_kumpul_tugas', 'bantuan_quiz', 'bantuan_forum', 'bantuan_logout', 'bantuan_lihat_nilai', 'tutorial_steps',
+  // --- LMS INTENTS BARU ---
+  'cek_tugas_belum_selesai', 'cek_deadline_hari_ini', 'cek_deadline_terdekat',
+  'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_aktivitas_course',
+  'cek_pengajar_course', 'cek_course_saya', 'buka_aktivitas', 'tanya_password'
 ];
 
 const normalizeText = (value = '') => String(value || '')
@@ -63,9 +49,61 @@ function ruleBasedDetect(message = '', elementContext = null) {
 
   const msg = normalizeText(stripFeedbackPrefix(message));
 
-  // DETEKSI DEADLINE
-  if (hasAny(msg, [/\b(deadline|tugas apa yang belum|ada tugas|quiz mana yang belum|jadwal tugas)\b/])) {
-    return 'tanya_deadline';
+  // =====================================================
+  // DETEKSI LMS CHECK — harus sebelum bantuan/tutorial umum.
+  // Tujuannya supaya pertanyaan seperti "kuis mana yang belum"
+  // tidak salah masuk ke intent deadline umum.
+  // =====================================================
+
+  // Forum yang belum dijawab / belum dibalas.
+  if (
+    hasAny(msg, [/\b(forum|diskusi|topik diskusi|postingan)\b/]) &&
+    hasAny(msg, [/\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja)\b/]) &&
+    hasAny(msg, [/\b(dijawab|jawab|balas|dibalas|reply|selesai|dikerjakan)\b/])
+  ) {
+    return 'cek_forum_belum_dijawab';
+  }
+
+  // Kuis/quiz/ulangan yang belum dikerjakan.
+  if (
+    hasAny(msg, [/\b(quiz|kuis|ujian|ulangan|soal)\b/]) &&
+    hasAny(msg, [/\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja)\b/]) &&
+    hasAny(msg, [/\b(dikerjakan|kerjakan|selesai|submit|dikumpulkan|kumpul)\b/])
+  ) {
+    return 'cek_quiz_belum_dikerjakan';
+  }
+
+  // Tugas/assignment yang belum selesai / belum dikumpulkan.
+  if (
+    hasAny(msg, [/\b(tugas|assignment|pengumpulan)\b/]) &&
+    hasAny(msg, [/\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja)\b/]) &&
+    hasAny(msg, [/\b(selesai|dikumpulkan|kumpul|dikerjakan|submit|unggah|upload)\b/])
+  ) {
+    return 'cek_tugas_belum_selesai';
+  }
+
+  // Deadline khusus hari ini.
+  if (
+    hasAny(msg, [/\b(deadline|tenggat|batas waktu|jatuh tempo)\b/]) &&
+    hasAny(msg, [/\b(hari ini|sekarang|today)\b/])
+  ) {
+    return 'cek_deadline_hari_ini';
+  }
+
+  // Deadline terdekat / jadwal tugas.
+  if (hasAny(msg, [/\b(deadline|tenggat|batas waktu|jatuh tempo|jadwal tugas|tugas terdekat|deadline terdekat)\b/])) {
+    return 'cek_deadline_terdekat';
+  }
+
+  // Pertanyaan umum "ada tugas?" lebih aman masuk ke pengecekan tugas,
+  // bukan deadline, karena siswa biasanya ingin tahu apa yang perlu dikerjakan.
+  if (hasAny(msg, [/\b(ada tugas|tugas apa aja|tugas apa saja|aktivitas apa aja|aktivitas apa saja)\b/])) {
+    return 'cek_tugas_belum_selesai';
+  }
+
+  // DETEKSI LOGOUT / KELUAR AKUN
+  if (hasAny(msg, [/\b(logout|log out|keluar akun|keluar dari akun|sign out|signout)\b/]) && hasAny(msg, [/\b(cara|gimana|bagaimana|tutorial|panduan|langkah|klik|buka)\b/])) {
+    return 'bantuan_logout';
   }
 
   // DETEKSI FORUM
@@ -92,6 +130,17 @@ function ruleBasedDetect(message = '', elementContext = null) {
   ])) {
     return 'out_of_context';
   }
+
+  if (hasAny(msg, [/\b(course|kursus) (saya|aku)( yang mana)?\b/])) return 'cek_course_saya';
+
+  // CEK PENGAJAR
+  if (hasAny(msg, [/\b(siapa) (pengajar|guru|dosen)\b/])) return 'cek_pengajar_course';
+
+  // CEK AKTIVITAS UMUM
+  if (hasAny(msg, [/\b(aktivitas|kegiatan|isinya) apa aja\b/])) return 'cek_aktivitas_course';
+
+  // BUKA AKTIVITAS (e.g. Buka kuis, Buka tugas minggu 2)
+  if (hasAny(msg, [/\b(buka|tampilkan) (tugas|kuis|quiz|forum)\b/])) return 'buka_aktivitas';
 
   // 3) Explicit guru contact.
   if (hasAny(msg, [/\b(hubungi guru|kontak guru|wa guru|whatsapp guru|minta bantuan guru)\b/])) {
@@ -223,37 +272,53 @@ function ruleBasedDetect(message = '', elementContext = null) {
   return null;
 }
 
-async function aiClassifyIntent(message = '') {
-  if (!geminiService?.generateWithFallback) return null;
+async function aiClassifyIntent(message) {
+  if (!geminiService) return null;
+  const cleanMessage = String(message || '').substring(0, 500);
 
-  const cleanMessage = stripFeedbackPrefix(message);
-  const prompt = `Kamu adalah classifier intent untuk AI Learning Buddy VClass.
-Tugasmu HANYA mengubah pesan user menjadi satu intent dari daftar ini:
-${ALLOWED_INTENTS.join(', ')}
+  // PROMPT BARU: FOKUS MAPPING JSON
+  const prompt = `Kamu adalah sistem "Intent Classifier" untuk asisten LMS VClass Moodle.
+Tugasmu BUKAN menjawab pertanyaan, melainkan mengklasifikasikan pesan siswa ke dalam "intent" (maksud) yang tepat dari daftar berikut.
 
-Aturan penting:
-- Kalau user bertanya cara masuk akun: bantuan_login.
-- Kalau user bertanya mencari/masuk kursus/course/kelas/mapel/Informatika: navigasi_kursus.
-- Kalau user sudah login atau sudah masuk kursus lalu mau mencari/membuka materi/modul/PDF/dokumen: akses_materi.
-- Kalau user bertanya cara membuat, menjawab, membalas, reply, atau mengerjakan forum diskusi: bantuan_forum.
-- Kalau user bertanya arti/pengertian/apa itu materi pelajaran, termasuk "media sosial": penjelasan_materi.
-- Kata "guru" hanya sumber instruksi, bukan burnout.
-- Jangan pilih bantuan_burnout kecuali user jelas capek/lelah/stres/nyerah/tidak sanggup.
-- Jawab hanya JSON pendek: {"intent":"..."}
+DAFTAR INTENT LMS (PRIORITAS):
+- cek_tugas_belum_selesai : Jika siswa bertanya tentang tugas/assign yang belum selesai.
+- cek_deadline_hari_ini : Jika siswa bertanya tenggat waktu KHUSUS hari ini.
+- cek_deadline_terdekat : Jika siswa bertanya deadline terdekat/mepet.
+- cek_quiz_belum_dikerjakan : Jika bertanya tentang kuis/ujian yang belum dikerjakan.
+- cek_forum_belum_dijawab : Jika bertanya tentang forum/diskusi.
+- cek_pengajar_course : Jika bertanya nama guru/pengajar.
+- cek_aktivitas_course : Jika bertanya isi daftar aktivitas di course.
+- buka_aktivitas : Jika siswa meminta "buka", "tampilkan", "lihat" tugas/kuis tertentu.
+- tanya_password : Jika siswa menanyakan kata sandinya.
+
+DAFTAR INTENT UMUM:
+- penjelasan_materi : Jika siswa bertanya arti/pengertian/konsep pelajaran (misal: "Apa itu media sosial?").
+- hubungi_guru : Jika siswa stres/butuh bantuan manusia.
+- bantuan_login, bantuan_tugas, bantuan_kuis, bantuan_forum, bantuan_logout : Jika bertanya "Cara" / teknis aplikasi.
+
+ATURAN:
+1. Analisa pesan user dengan cermat. "Ada deadline apa aja hari ini?" -> cek_deadline_hari_ini.
+2. Keluarkan HANYA format JSON valid tanpa markdown, contoh: {"intent": "cek_deadline_hari_ini", "confidence": 0.95}
 
 Pesan user:
-${cleanMessage}`;
+"${cleanMessage}"`;
 
   try {
     const result = await geminiService.generateWithFallback(prompt);
     if (!result?.ok || !result.text) return null;
+
+    // Parse JSON murni dari Gemini
     const raw = String(result.text).trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { intent: raw.replace(/[^a-z_]/gi, '') };
-    const intent = String(parsed.intent || '').trim();
-    return ALLOWED_INTENTS.includes(intent) ? intent : null;
-  } catch (_) {
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const intent = String(parsed.intent || '').trim();
+      return ALLOWED_INTENTS.includes(intent) ? intent : null;
+    }
     return null;
+  } catch (error) {
+    console.error('[Intent Service] Gagal mapping JSON:', error.message);
+    return null; // Fallback ke rule-based jika AI Limit/Error
   }
 }
 

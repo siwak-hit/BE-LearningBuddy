@@ -39,6 +39,7 @@ CREATE TABLE public.documents (
   source_type text DEFAULT 'upload'::text,
   status text NOT NULL DEFAULT 'uploaded'::text,
   created_at timestamp with time zone NOT NULL DEFAULT now(),
+  source_url text,
   CONSTRAINT documents_pkey PRIMARY KEY (id),
   CONSTRAINT documents_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
 );
@@ -209,6 +210,8 @@ CREATE TABLE public.lms_course_routes (
   is_active boolean NOT NULL DEFAULT true,
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  teacher_name text,
+  last_synced_at timestamp with time zone DEFAULT now(),
   CONSTRAINT lms_course_routes_pkey PRIMARY KEY (id),
   CONSTRAINT lms_course_routes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
 );
@@ -227,7 +230,46 @@ CREATE TABLE public.lms_activity_routes (
   is_active boolean NOT NULL DEFAULT true,
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  section_name text,
+  deadline timestamp with time zone,
+  teacher_name text,
+  is_visible boolean DEFAULT true,
+  completion_status text,
+  last_synced_at timestamp with time zone DEFAULT now(),
   CONSTRAINT lms_activity_routes_pkey PRIMARY KEY (id),
   CONSTRAINT lms_activity_routes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id),
   CONSTRAINT lms_activity_routes_activity_instruction_id_fkey FOREIGN KEY (activity_instruction_id) REFERENCES public.activity_instructions(id)
+);
+CREATE TABLE public.ai_response_cache (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  cache_key text NOT NULL,
+  question text NOT NULL,
+  normalized_question text NOT NULL,
+  answer text NOT NULL,
+  response_source text DEFAULT 'ai'::text,
+  intent text,
+  source_type text,
+  context_hash text,
+  model text,
+  hit_count integer NOT NULL DEFAULT 0,
+  expires_at timestamp with time zone,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT ai_response_cache_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.moodle_configs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL UNIQUE,
+  rest_endpoint text NOT NULL,
+  token text NOT NULL,
+  course_map jsonb NOT NULL DEFAULT '{}'::jsonb,
+  is_active boolean DEFAULT true,
+  last_test_status text,
+  last_test_message text,
+  last_test_at timestamp with time zone,
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT moodle_configs_pkey PRIMARY KEY (id),
+  CONSTRAINT moodle_configs_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
 );

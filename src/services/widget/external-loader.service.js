@@ -16,20 +16,19 @@ const externalLoaderService = {
 
   if (document.getElementById('alb-external-launcher')) return;
 
-
   function getCourseIdFromUrl(url) {
     try {
       var parsed = new URL(url || window.location.href, window.location.href);
-      return parsed.searchParams.get('id') || '2';
+      return parsed.searchParams.get('id') || null;
     } catch (e) {
-      return '2';
+      return null;
     }
   }
 
   function resolveNavigationUrl(targetUrl, pageType, courseId) {
     var LMS_BASE = 'https://lms.smpn167jakarta.sch.id';
-    var cleanType = String(pageType || '').toLowerCase().replace(/\s+/g, '').replace(/_/g, '');
-    var id = courseId || getCourseIdFromUrl(window.location.href);
+    var cleanType = String(pageType || '').toLowerCase().replace(/\\s+/g, '').replace(/_/g, '');
+    var id = courseId || getCourseIdFromUrl(window.location.href) || '2';
 
     if (targetUrl) {
       try {
@@ -119,7 +118,163 @@ const externalLoaderService = {
     btn.className = 'alb-ext-launcher-btn';
     btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
 
-    function showMiniForm() {
+    function checkMoodleLoginStatus() {
+      if (document.body.classList.contains('notloggedin')) return false;
+      if (document.querySelector('a[href*="logout.php"]')) return true;
+      if (document.querySelector('.userpicture')) return true;
+      var userNode = document.querySelector('.usertext, .userbutton .usertext, .usermenu .usertext');
+      if (userNode && userNode.innerText.trim() !== '') return true;
+      return false;
+    }
+
+    function extractMoodleContext() {
+      var ctx = {
+        source_url: window.location.href,
+        page_title: document.title,
+        course_id: getCourseIdFromUrl(window.location.href),
+        course_title: null,
+        student_name: null,
+        username: null,
+        email: null,
+        moodle_user_id: null
+      };
+
+      try {
+        var h1 = document.querySelector('h1, .page-header-headings h1, .coursename');
+        if (h1) ctx.course_title = h1.innerText.trim();
+
+        var userNode = document.querySelector('.usertext, .userbutton .usertext, .usermenu .usertext');
+        if (userNode) ctx.student_name = userNode.innerText.trim();
+
+        var mailto = document.querySelector('a[href^="mailto:"]');
+        if (mailto) ctx.email = mailto.href.replace('mailto:', '').trim();
+
+        var userMenu = document.querySelector('[data-userid]');
+        if (userMenu) ctx.moodle_user_id = userMenu.getAttribute('data-userid');
+      } catch (e) {
+        console.error('[AI Buddy] Ekstraksi Moodle context gagal:', e);
+      }
+
+      delete ctx.password;
+      return ctx;
+    }
+
+
+
+    function normalizeClassCodeFromText(value) {
+      var raw = String(value || '').toUpperCase().replace(/[-_\\/]+/g, ' ').replace(/\\s+/g, ' ').trim();
+      var m = raw.match(/\\b(7|8|9|10|11|12)\\s*([A-Z])\\b/);
+      if (m) return (m[1] + m[2]).toUpperCase();
+      var roman = raw.match(/\\b(VII|VIII|IX|X|XI|XII)\\s*([A-Z])\\b/);
+      if (roman) {
+        var map = { VII:'7', VIII:'8', IX:'9', X:'10', XI:'11', XII:'12' };
+        return (map[roman[1]] || '') + roman[2];
+      }
+      return '';
+    }
+
+    function detectModuleType(node, text) {
+      var cls = String(node.className || '').toLowerCase();
+      var t = String(text || '').toLowerCase();
+      if (cls.indexOf('modtype_assign') !== -1 || /\\b(tugas|assignment|submit|pengumpulan)\\b/i.test(t)) return 'assign';
+      if (cls.indexOf('modtype_quiz') !== -1 || /\\b(kuis|quiz|ulangan|ujian)\\b/i.test(t)) return 'quiz';
+      if (cls.indexOf('modtype_forum') !== -1 || /\\b(forum|diskusi)\\b/i.test(t)) return 'forum';
+      if (cls.indexOf('modtype_page') !== -1 || cls.indexOf('modtype_resource') !== -1 || /\\b(materi|cms|wordpress|instalasi|dashboard)\\b/i.test(t)) return 'materi';
+      return '';
+    }
+
+    function cleanText(value) {
+      return String(value || '').replace(/\\s+/g, ' ').trim();
+    }
+
+    function extractCoursePageActivities() {
+      var courseId = getCourseIdFromUrl(window.location.href);
+      if (!courseId) return [];
+
+      var courseTitle = '';
+      var heading = document.querySelector('h1, .page-header-headings h1, .coursename');
+      if (heading) courseTitle = cleanText(heading.innerText);
+
+      var candidates = Array.prototype.slice.call(document.querySelectorAll([
+        'li.activity',
+        '.activity-item',
+        '[data-for="cmitem"]',
+        '[id^="module-"]',
+        '.course-content .activity'
+      ].join(',')));
+
+      var seen = {};
+      var result = [];
+      candidates.forEach(function(node, index) {
+        var text = cleanText(node.innerText || '');
+        if (!text || text.length < 3) return;
+
+        var type = detectModuleType(node, text);
+        if (!type) return;
+
+        var titleNode = node.querySelector('.instancename, .activityname, .aalink, a[href*="/mod/"], .activitytitle, [data-activityname]');
+        var title = titleNode ? cleanText(titleNode.innerText || titleNode.getAttribute('data-activityname') || '') : '';
+        if (!title) {
+          title = text.split(/\\n|Tidak tersedia kecuali|Available until|Selesai|Lakukan/i)[0];
+          title = cleanText(title).slice(0, 120);
+        }
+        if (!title) return;
+
+        // Abaikan forum pengumuman untuk fitur forum belajar. Forum diskusi tetap diambil.
+        if (type === 'forum' && /^pengumuman$/i.test(title)) return;
+
+        var link = node.querySelector('a[href*="/mod/"]');
+        var href = link ? link.href : '';
+        var availabilityNode = node.querySelector('.availabilityinfo, .availability_info, .description .availabilityinfo, [class*="availability"]');
+        var availabilityInfo = availabilityNode ? cleanText(availabilityNode.innerText) : '';
+        if (!availabilityInfo) {
+          var lockedMatch = text.match(/(Tidak tersedia kecuali[\\s\\S]{0,180}|Not available unless[\\s\\S]{0,180}|Restricted[\\s\\S]{0,120})/i);
+          availabilityInfo = lockedMatch ? cleanText(lockedMatch[1]) : '';
+        }
+
+        var completed = /\\b(Selesai|Completed)\\b/i.test(text) && !/Tidak tersedia kecuali/i.test(text);
+        var locked = Boolean(availabilityInfo) || /\\b(terkunci|not available|restricted|tidak tersedia kecuali)\\b/i.test(text);
+        var actionText = /\\b(Lakukan|Kerjakan|Attempt|Add submission|Reply|Balas)\\b/i.test(text) ? 'Lakukan' : '';
+        var status = locked ? 'Terkunci / belum bisa dibuka' : (completed ? 'Selesai' : (actionText ? 'Belum selesai' : 'Belum diketahui'));
+
+        var sectionNode = node.closest('li.section, .course-section, [data-sectionid]');
+        var sectionTitle = '';
+        if (sectionNode) {
+          var sectionHeading = sectionNode.querySelector('.sectionname, .section-title, h3, h4');
+          if (sectionHeading) sectionTitle = cleanText(sectionHeading.innerText);
+        }
+
+        var moduleId = null;
+        var idMatch = String(node.id || '').match(/module-(\\d+)/i) || (href ? href.match(/[?&]id=(\\d+)/) : null);
+        if (idMatch) moduleId = Number(idMatch[1]);
+
+        var key = type + ':' + title + ':' + moduleId;
+        if (seen[key]) return;
+        seen[key] = true;
+
+        result.push({
+          title: title,
+          type: type,
+          moodle_activity_type: type,
+          module_id: moduleId,
+          url: href,
+          course_id: Number(courseId),
+          course_title: courseTitle,
+          section_name: sectionTitle || 'Course',
+          status: status,
+          is_available: !locked,
+          is_completed: completed,
+          availability_info: availabilityInfo,
+          action_text: actionText,
+          sequence_order: index + 1,
+          source: 'browser_dom'
+        });
+      });
+
+      return result;
+    }
+
+    function showNotLoggedInAlert() {
       if (document.getElementById('alb-mini-form-overlay')) return;
 
       var theme = config.theme || {};
@@ -130,79 +285,301 @@ const externalLoaderService = {
       var overlay = document.createElement('div');
       overlay.id = 'alb-mini-form-overlay';
       overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
+      overlay.innerHTML = [
+        '<div style="background:#fff;padding:32px 24px;border-radius:16px;width:90%;max-width:340px;box-shadow:0 10px 25px rgba(0,0,0,0.2);font-family:Inter, system-ui, sans-serif;text-align:center;">',
+        '  <div style="font-size:42px;margin-bottom:16px;color:#f59e0b;">🔒</div>',
+        '  <h3 style="margin:0 0 8px 0;font-size:18px;color:#1a1a1a;font-weight:700;">Belum Login VClass</h3>',
+        '  <p style="margin:0 0 24px 0;font-size:13px;color:#666;line-height:1.5;">Silakan login dulu agar AI bisa membaca konteks course. Kalau belum bisa login, kamu tetap bisa lanjut sebagai guest dengan verifikasi email Moodle.</p>',
+        '  <div style="display:flex;flex-direction:column;gap:10px;">',
+        '    <button id="alb-btn-login-vclass" style="width:100%;padding:12px 16px;border:none;background:' + primaryColor + ';color:' + buttonTextColor + ';border-radius:8px;cursor:pointer;font-weight:600;font-size:14px;">Login ke VClass</button>',
+        '    <button id="alb-btn-chat-guest" style="width:100%;padding:12px 16px;border:1px solid #d6d3d1;background:#fff;color:#444;border-radius:8px;cursor:pointer;font-weight:600;font-size:14px;">Lanjut Chat (Guest)</button>',
+        '  </div>',
+        '  <button id="alb-btn-cancel-alert" style="margin-top:16px;background:none;border:none;color:#999;font-size:12px;cursor:pointer;text-decoration:underline;">Batal</button>',
+        '</div>'
+      ].join('');
+      document.body.appendChild(overlay);
+      document.getElementById('alb-btn-login-vclass').onclick = function() { window.location.href = 'https://lms.smpn167jakarta.sch.id/login/index.php'; };
+      document.getElementById('alb-btn-chat-guest').onclick = function() { document.body.removeChild(overlay); showMiniForm(); };
+      document.getElementById('alb-btn-cancel-alert').onclick = function() { document.body.removeChild(overlay); };
+    }
+
+
+    function showMiniForm(prefillContext) {
+      if (document.getElementById('alb-mini-form-overlay')) return;
+      prefillContext = prefillContext || {};
+      var prefillEmail = prefillContext.email || '';
+      var prefillCourseId = prefillContext.course_id || getCourseIdFromUrl(window.location.href) || null;
+
+      var theme = config.theme || {};
+      if (typeof theme === 'string') { try { theme = JSON.parse(theme); } catch (e) { theme = {}; } }
+      var primaryColor = theme.primaryColor || '#0c0a09';
+      var buttonTextColor = theme.buttonTextColor || '#ffffff';
+
+      var resolvedIdentity = null;
+      var selectedCourse = null;
+
+      function escapeHtmlInline(value) {
+        return String(value || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function normalizeClassCodeLocal(value) {
+        var raw = String(value || '').toUpperCase().trim();
+        var match = raw.match(/\\b(7|8|9|10|11|12)\\s*([A-Z])\\b/);
+        if (match) return (match[1] + match[2]).toUpperCase();
+        return raw;
+      }
+
+      function setMiniStatus(message, type) {
+        var statusEl = document.getElementById('alb-mini-status');
+        if (!statusEl) return;
+        statusEl.innerHTML = message || '';
+        statusEl.style.display = message ? 'block' : 'none';
+        statusEl.style.color = type === 'success' ? '#047857' : (type === 'warning' ? '#92400e' : '#b91c1c');
+        statusEl.style.background = type === 'success' ? '#ecfdf5' : (type === 'warning' ? '#fffbeb' : '#fef2f2');
+        statusEl.style.borderColor = type === 'success' ? '#a7f3d0' : (type === 'warning' ? '#fde68a' : '#fecaca');
+      }
+
+      function setClassEnabled(enabled) {
+        var select = document.getElementById('alb-input-kelas');
+        var submit = document.getElementById('alb-btn-submit');
+        if (select) select.disabled = !enabled;
+        if (submit) submit.disabled = !enabled;
+        if (submit) submit.style.opacity = enabled ? '1' : '0.55';
+      }
+
+      function renderClassOptions(courses) {
+        var select = document.getElementById('alb-input-kelas');
+        if (!select) return;
+
+        select.innerHTML = '<option value="">Pilih kelas dari akun Moodle</option>';
+        selectedCourse = null;
+
+        (courses || []).forEach(function(course, index) {
+          var classCode = normalizeClassCodeLocal(course.class_code || course.classCode || '');
+          var courseId = course.course_id || course.courseId || '';
+          var courseTitle = course.course_title || course.courseTitle || ('Course ' + courseId);
+          if (!classCode || !courseId) return;
+
+          var option = document.createElement('option');
+          option.value = classCode;
+          option.textContent = classCode + ' — ' + courseTitle;
+          option.setAttribute('data-index', String(index));
+          select.appendChild(option);
+        });
+
+        if ((courses || []).length === 1) {
+          var only = courses[0];
+          select.value = normalizeClassCodeLocal(only.class_code || only.classCode || '');
+          selectedCourse = only;
+        }
+
+        setClassEnabled((courses || []).length > 0);
+      }
+
+      function checkEmailAndLoadCourses(autoRun) {
+        var emailInput = document.getElementById('alb-input-email');
+        var checkBtn = document.getElementById('alb-btn-check-email');
+        var email = emailInput ? emailInput.value.trim() : '';
+
+        if (!email || email.indexOf('@') === -1) {
+          if (emailInput) emailInput.style.borderColor = 'red';
+          setMiniStatus('Masukkan email Moodle yang valid terlebih dahulu.', 'error');
+          return;
+        }
+
+        if (emailInput) emailInput.style.borderColor = '#e5e5e5';
+        if (checkBtn) {
+          checkBtn.disabled = true;
+          checkBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin" style="margin-right:6px;"></i>Mengecek...';
+          checkBtn.style.opacity = '0.7';
+        }
+
+        setMiniStatus('Sedang mengecek email ke data peserta Moodle...', 'warning');
+        setClassEnabled(false);
+        renderClassOptions([]);
+
+        fetch(apiBase + '/api/moodle/student/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectKey: projectKey,
+            email: email
+          })
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(res) {
+          if (!res || res.status !== 'success' || !res.data || !res.data.found) {
+            resolvedIdentity = null;
+            setMiniStatus((res && res.data && res.data.message) || (res && res.message) || 'Email tidak ditemukan di course Moodle yang tersinkron.', 'error');
+            return;
+          }
+
+          resolvedIdentity = res.data;
+          var courses = res.data.enrolled_courses || [];
+
+          if (!courses.length) {
+            setMiniStatus('Email ditemukan, tetapi sistem belum menemukan daftar course/kelas dari akun ini. Coba sinkronisasi course di dashboard.', 'error');
+            return;
+          }
+
+          renderClassOptions(courses);
+          var name = res.data.fullname || email.split('@')[0];
+          setMiniStatus('Akun ditemukan: <b>' + escapeHtmlInline(name) + '</b>. Silakan pilih kelas yang ingin digunakan.', 'success');
+        })
+        .catch(function(err) {
+          console.error('[AI Buddy] Gagal cek email Moodle:', err);
+          resolvedIdentity = null;
+          setMiniStatus('Gagal mengecek email. Pastikan koneksi Moodle dan API aktif.', 'error');
+        })
+        .finally(function() {
+          if (checkBtn) {
+            checkBtn.disabled = false;
+            checkBtn.innerHTML = '<i class="fa-solid fa-magnifying-glass" style="margin-right:6px;"></i>Cek Email';
+            checkBtn.style.opacity = '1';
+          }
+        });
+      }
+
+      var overlay = document.createElement('div');
+      overlay.id = 'alb-mini-form-overlay';
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
 
       overlay.innerHTML = [
-        '<div style="background:#fff;padding:24px;border-radius:12px;width:90%;max-width:320px;box-shadow:0 10px 25px rgba(0,0,0,0.2);font-family:Inter, system-ui, sans-serif;">',
+        '<div style="background:#fff;padding:24px;border-radius:16px;width:92%;max-width:380px;box-shadow:0 10px 25px rgba(0,0,0,0.2);font-family:Inter, system-ui, sans-serif;">',
         '  <h3 style="margin:0 0 6px 0;font-size:18px;color:#1a1a1a;font-weight:700;">Mulai Sesi Belajar</h3>',
-        '  <p style="margin:0 0 16px 0;font-size:13px;color:#666;">Beri tahu AI Buddy namamu agar dia bisa mengenalimu.</p>',
-        '  <input id="alb-input-nama" type="text" placeholder="Nama Lengkap / Panggilan" style="width:100%;padding:10px 12px;margin-bottom:12px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;" onfocus="this.style.borderColor=\\''+primaryColor+'\\'" onblur="this.style.borderColor=\\'#e5e5e5\\'">',
-        '  <select id="alb-input-kelas" style="width:100%;padding:10px 12px;margin-bottom:20px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;background:#fff;color:#1a1a1a;" onfocus="this.style.borderColor=\\''+primaryColor+'\\'" onblur="this.style.borderColor=\\'#e5e5e5\\'">',
-        '    <option value="">Pilih Kelas</option>',
-        '    <option value="8A">8A</option>',
-        '    <option value="8B">8B</option>',
-        '    <option value="8C">8C</option>',
-        '    <option value="8D">8D</option>',
-        '    <option value="8E">8E</option>',
-        '    <option value="8F">8F</option>',
-        '    <option value="8G">8G</option>',
-        '    <option value="8H">8H</option>',
+        '  <p style="margin:0 0 16px 0;font-size:13px;color:#666;line-height:1.5;">Masukkan email Moodle dulu. Setelah email terdeteksi, pilihan kelas akan muncul sesuai course yang kamu ikuti.</p>',
+        '  <label style="display:block;font-size:12px;color:#444;font-weight:700;margin-bottom:6px;">Email Moodle</label>',
+        '  <div style="display:flex;gap:8px;margin-bottom:12px;">',
+        '    <input id="alb-input-email" type="email" value="' + escapeHtmlInline(prefillEmail) + '" placeholder="Email Moodle kamu" style="flex:1;min-width:0;padding:10px 12px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;"">',
+        '    <button id="alb-btn-check-email" type="button" style="padding:10px 12px;border:none;background:'+primaryColor+';color:'+buttonTextColor+';border-radius:8px;cursor:pointer;font-weight:700;font-size:12px;white-space:nowrap;"><i class="fa-solid fa-magnifying-glass" style="margin-right:6px;"></i>Cek Email</button>',
+        '  </div>',
+        '  <div id="alb-mini-status" style="display:none;margin-bottom:12px;padding:9px 10px;border:1px solid #fde68a;border-radius:8px;font-size:12px;line-height:1.4;"></div>',
+        '  <label style="display:block;font-size:12px;color:#444;font-weight:700;margin-bottom:6px;">Kelas / Course</label>',
+        '  <select id="alb-input-kelas" disabled style="width:100%;padding:10px 12px;margin-bottom:18px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;background:#fff;color:#1a1a1a;"">',
+        '    <option value="">Cek email dulu</option>',
         '  </select>',
         '  <div style="display:flex;gap:8px;justify-content:flex-end;">',
-        '    <button id="alb-btn-cancel" style="padding:8px 16px;border:none;background:transparent;color:#666;cursor:pointer;font-weight:600;font-size:13px;border-radius:6px;">Batal</button>',
-        '    <button id="alb-btn-submit" style="padding:8px 16px;border:none;background:'+primaryColor+';color:'+buttonTextColor+';border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;transition:opacity 0.2s;">Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i></button>',
+        '    <button id="alb-btn-cancel" style="padding:9px 16px;border:none;background:transparent;color:#666;cursor:pointer;font-weight:600;font-size:13px;border-radius:6px;">Batal</button>',
+        '    <button id="alb-btn-submit" disabled style="padding:9px 16px;border:none;background:'+primaryColor+';color:'+buttonTextColor+';border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;opacity:0.55;transition:opacity 0.2s;">Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i></button>',
         '  </div>',
         '</div>'
       ].join('');
 
       document.body.appendChild(overlay);
 
+      var emailInput = document.getElementById('alb-input-email');
+      var kelasSelect = document.getElementById('alb-input-kelas');
+      [emailInput, kelasSelect].forEach(function(el) {
+        if (!el) return;
+        el.onfocus = function() { this.style.borderColor = primaryColor; };
+        el.onblur = function() { this.style.borderColor = '#e5e5e5'; };
+      });
+
+      setClassEnabled(false);
+
       document.getElementById('alb-btn-cancel').onclick = function() {
         document.body.removeChild(overlay);
       };
 
+      document.getElementById('alb-btn-check-email').onclick = function() {
+        checkEmailAndLoadCourses(false);
+      };
+
+      var emailInputEl = document.getElementById('alb-input-email');
+      if (emailInputEl) {
+        emailInputEl.addEventListener('input', function() {
+          resolvedIdentity = null;
+          selectedCourse = null;
+          renderClassOptions([]);
+          setClassEnabled(false);
+          setMiniStatus('', '');
+        });
+        emailInputEl.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            checkEmailAndLoadCourses(false);
+          }
+        });
+      }
+
+      document.getElementById('alb-input-kelas').onchange = function() {
+        var selectedClass = this.value;
+        selectedCourse = null;
+        if (resolvedIdentity && Array.isArray(resolvedIdentity.enrolled_courses)) {
+          selectedCourse = resolvedIdentity.enrolled_courses.find(function(course) {
+            return normalizeClassCodeLocal(course.class_code || course.classCode || '') === selectedClass;
+          }) || null;
+        }
+        setClassEnabled(Boolean(selectedClass && selectedCourse));
+      };
+
       document.getElementById('alb-btn-submit').onclick = function() {
-        var nama = document.getElementById('alb-input-nama').value.trim();
+        var email = document.getElementById('alb-input-email').value.trim();
         var kelas = document.getElementById('alb-input-kelas').value.trim();
 
-        if (!nama) {
-          document.getElementById('alb-input-nama').style.borderColor = 'red';
+        if (!resolvedIdentity || !resolvedIdentity.found) {
+          setMiniStatus('Cek email dulu sampai akun Moodle ditemukan.', 'error');
           return;
         }
 
-        if (!kelas) {
-          document.getElementById('alb-input-kelas').style.borderColor = 'red';
+        if (!selectedCourse || !kelas) {
+          setMiniStatus('Pilih kelas yang tersedia dari akun Moodle kamu.', 'error');
           return;
         }
-        var alias = nama + (kelas ? ' - ' + kelas : '');
-        sessionStorage.setItem('alb_student_name', alias);
+
+        var fullName = resolvedIdentity.fullname || email.split('@')[0];
+        var alias = fullName + ' - ' + kelas;
+        sessionStorage.setItem('alb_student_name', fullName);
 
         var btnSubmit = document.getElementById('alb-btn-submit');
         btnSubmit.innerHTML = 'Menyiapkan...';
         btnSubmit.disabled = true;
         btnSubmit.style.opacity = '0.7';
 
-        // PAYLOAD BARU: Tanpa getPageContext() yang berat
-        var cleanKelas = kelas;
+        var courseId = selectedCourse.course_id || selectedCourse.courseId || prefillCourseId || getCourseIdFromUrl(window.location.href);
+        var courseTitle = selectedCourse.course_title || selectedCourse.courseTitle || null;
+        var courseUrl = selectedCourse.course_url || selectedCourse.courseUrl || null;
+
+        var sessionMeta = {
+          display_name: fullName,
+          moodle_verified: true,
+          moodle_user_id: resolvedIdentity.moodle_user_id || null,
+          username: resolvedIdentity.username || null,
+          email: resolvedIdentity.email || email,
+          class_code: kelas,
+          course_id: courseId,
+          course_title: courseTitle,
+          course_url: courseUrl,
+          enrolled_courses: resolvedIdentity.enrolled_courses || [],
+          page_activities: prefillContext.page_activities || extractCoursePageActivities()
+        };
 
         var payload = {
           projectKey: projectKey,
           sourceUrl: window.location.href,
           studentAlias: alias,
           mode: 'external',
-
           courseContext: {
-            class_code: cleanKelas
+            class_code: kelas,
+            course_id: courseId,
+            course_title: courseTitle,
+            course_url: courseUrl,
+            enrolled_courses: resolvedIdentity.enrolled_courses || [],
+            page_activities: sessionMeta.page_activities || []
           },
-
           pageContext: {
             title: document.title,
             heading: (document.querySelector('h1') || {}).innerText || '',
             summary: (document.querySelector('main p') || {}).innerText || 'Halaman Virtual Class',
-            session_meta: {
-              display_name: alias,
-              class_code: cleanKelas
-            }
-          }
+            session_meta: sessionMeta,
+            page_activities: sessionMeta.page_activities || []
+          },
+          moodleContext: sessionMeta
         };
 
         fetch(apiBase + '/api/chat/session', {
@@ -220,24 +597,78 @@ const externalLoaderService = {
             var targetUrl = appUrl + '/buddy?projectKey=' + encodeURIComponent(projectKey) + '&sessionId=' + encodeURIComponent(res.data.session.id) + '&mode=external';
             window.open(targetUrl, 'alb_ai_workspace');
           } else {
-            alert('Gagal menghubungkan ke AI Buddy.');
-            btnSubmit.innerHTML = 'Coba Lagi';
-            btnSubmit.disabled = false;
-            btnSubmit.style.opacity = '1';
+            throw new Error('Gagal menghubungkan ke AI Buddy.');
           }
         })
         .catch(function(err) {
           console.error('[AI Buddy] Error:', err);
-          alert('Gagal menghubungkan ke AI Buddy.');
-          btnSubmit.innerHTML = 'Coba Lagi';
+          setMiniStatus('Gagal menghubungkan ke AI Buddy. Coba lagi.', 'error');
+          btnSubmit.innerHTML = 'Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i>';
           btnSubmit.disabled = false;
           btnSubmit.style.opacity = '1';
         });
       };
+
+      if (prefillEmail) {
+        setTimeout(function() { checkEmailAndLoadCourses(true); }, 250);
+      }
     }
 
+
     btn.onclick = function() {
-      showMiniForm();
+      btn.innerHTML = '<span style="font-size:18px;display:inline-block;animation:spin 1s linear infinite;">↻</span><style>@keyframes spin { 100% { transform:rotate(360deg); } }</style>';
+      btn.disabled = true;
+
+      var ctx = extractMoodleContext();
+      ctx.page_activities = extractCoursePageActivities();
+      var isLoggedIn = checkMoodleLoginStatus();
+
+      if (!isLoggedIn) {
+        btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
+        btn.disabled = false;
+        showNotLoggedInAlert();
+        return;
+      }
+
+      if ((ctx.email || ctx.moodle_user_id) && ctx.course_id) {
+        fetch(apiBase + '/api/chat/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectKey: projectKey,
+            sourceUrl: window.location.href,
+            pageContext: { title: document.title, session_meta: ctx, page_activities: ctx.page_activities || [] },
+            courseContext: {
+              course_id: ctx.course_id || null,
+              course_title: ctx.course_title || null,
+              page_activities: ctx.page_activities || []
+            },
+            moodleContext: ctx
+          })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(res) {
+          btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
+          btn.disabled = false;
+
+          if (res.status === 'success' && res.data && res.data.session) {
+            var targetUrl = appUrl + '/buddy?projectKey=' + encodeURIComponent(projectKey) + '&sessionId=' + encodeURIComponent(res.data.session.id) + '&mode=external';
+            window.open(targetUrl, 'alb_ai_workspace');
+          } else {
+            showMiniForm(ctx);
+          }
+        })
+        .catch(function(err) {
+          console.error('[AI Buddy] Auto session gagal (CORS/Network):', err);
+          btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
+          btn.disabled = false;
+          showMiniForm(ctx);
+        });
+      } else {
+        btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
+        btn.disabled = false;
+        showMiniForm(ctx);
+      }
     };
 
     document.body.appendChild(btn);

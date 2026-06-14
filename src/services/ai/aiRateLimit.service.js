@@ -10,57 +10,76 @@ const aiRateLimitService = {
     const now = Date.now();
     const userData = this.users.get(sessionId);
 
-    // Belum pernah hit AI
     if (!userData) return this._defaultStatus();
 
-    // Cek apakah sedang cooldown
     if (userData.cooldownEndsAt) {
       if (now >= userData.cooldownEndsAt) {
-        // Cooldown selesai, reset
-        this.users.set(sessionId, { used: 0, cooldownEndsAt: null });
+        this.users.set(sessionId, {
+          used: 0,
+          cooldownEndsAt: null,
+          limitReached: false
+        });
+
         return this._defaultStatus();
-      } else {
-        // Masih cooldown
-        const remainingSeconds = Math.ceil((userData.cooldownEndsAt - now) / 1000);
-        return {
-          used: userData.used,
-          max: AI_MAX,
-          remaining: 0,
-          cooldown_active: true,
-          cooldown_remaining_seconds: remainingSeconds,
-          canUseAI: false
-        };
       }
+
+      const remainingSeconds = Math.ceil((userData.cooldownEndsAt - now) / 1000);
+
+      return {
+        used: AI_MAX,
+        max: AI_MAX,
+        remaining: 0,
+        limit_reached: true,
+        cooldown_active: true,
+        cooldown_remaining_seconds: remainingSeconds,
+        canUseAI: false
+      };
     }
 
-    // Ada usage, tidak cooldown
+    const used = Number(userData.used || 0);
+    const limitReached = used >= AI_MAX || Boolean(userData.limitReached);
+
     return {
-      used: userData.used,
+      used,
       max: AI_MAX,
-      remaining: AI_MAX - userData.used,
+      remaining: Math.max(0, AI_MAX - used),
+      limit_reached: limitReached,
       cooldown_active: false,
       cooldown_remaining_seconds: 0,
-      canUseAI: userData.used < AI_MAX
+      canUseAI: !limitReached
     };
   },
 
   consume(sessionId) {
     if (!sessionId) return this._defaultStatus();
 
-    const now = Date.now();
     const currentStatus = this.getStatus(sessionId);
 
-    // Update usage
-    let newUsed = currentStatus.used + 1;
-    let cooldownEndsAt = null;
-
-    if (newUsed >= AI_MAX) {
-      cooldownEndsAt = now + COOLDOWN_MS;
+    if (currentStatus.cooldown_active || currentStatus.limit_reached) {
+      return currentStatus;
     }
+
+    const newUsed = Math.min(AI_MAX, Number(currentStatus.used || 0) + 1);
+    const limitReached = newUsed >= AI_MAX;
 
     this.users.set(sessionId, {
       used: newUsed,
-      cooldownEndsAt: cooldownEndsAt
+      cooldownEndsAt: null,
+      limitReached
+    });
+
+    return this.getStatus(sessionId);
+  },
+
+  startCooldown(sessionId) {
+    if (!sessionId) return this._defaultStatus();
+
+    const now = Date.now();
+
+    this.users.set(sessionId, {
+      used: AI_MAX,
+      cooldownEndsAt: now + COOLDOWN_MS,
+      limitReached: true
     });
 
     return this.getStatus(sessionId);
@@ -71,6 +90,7 @@ const aiRateLimitService = {
       used: 0,
       max: AI_MAX,
       remaining: AI_MAX,
+      limit_reached: false,
       cooldown_active: false,
       cooldown_remaining_seconds: 0,
       canUseAI: true

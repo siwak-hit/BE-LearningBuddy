@@ -4,11 +4,12 @@ const response = require('../utils/response');
 const crypto = require('crypto');
 const chatService = require('../services/chat/chat.service');
 const aiRateLimitService = require('../services/ai/aiRateLimit.service');
+const aiQueueService = require('../services/ai/aiQueue.service');
 const ruleService = require('../services/chat/rule.service');
 
 const chatController = {
   createSession: asyncHandler(async (req, res) => {
-    const { projectKey, sourceUrl, courseContext, pageContext, studentAlias } = req.body;
+    const { projectKey, sourceUrl, courseContext, pageContext, studentAlias, moodleContext } = req.body;
     if (!projectKey) return response.error(res, 'projectKey diperlukan', null, 400);
 
     const projectId = await chatModel.getProjectIdByKey(projectKey);
@@ -17,9 +18,29 @@ const chatController = {
     const sessionKey = `sess_${crypto.randomBytes(8).toString('hex')}`;
     const shortCode = sessionKey.substring(5, 8).toUpperCase();
 
-    // Pembuatan Display Name Otomatis
+    // Mapping Moodle Course ID ke Kelas
+    const courseMap = { '2': '8A', '3': '8B', '4': '8C', '6': '8D', '7': '8E', '9': '8F', '8': '8G', '5': '8H' };
+    let autoClassCode = null;
+    let autoStudentName = null;
+
+    if (moodleContext) {
+      if (moodleContext.course_id && courseMap[moodleContext.course_id]) {
+        autoClassCode = courseMap[moodleContext.course_id];
+      } else if (moodleContext.class_code) {
+        autoClassCode = String(moodleContext.class_code).toUpperCase().replace(/\s+/g, '');
+      } else if (courseContext?.class_code) {
+        autoClassCode = String(courseContext.class_code).toUpperCase().replace(/\s+/g, '');
+      }
+      if (moodleContext.student_name) {
+        autoStudentName = moodleContext.student_name;
+      }
+    }
+
+    // Pembuatan Display Name Otomatis (Memprioritaskan nama auto-detect dari Moodle)
     let displayName = `Pengunjung #${shortCode}`;
-    if (studentAlias) {
+    if (autoStudentName) {
+      displayName = autoStudentName;
+    } else if (studentAlias) {
       displayName = studentAlias;
     } else if (pageContext?.heading) {
       displayName += ` - ${pageContext.heading}`;
@@ -30,38 +51,29 @@ const chatController = {
       displayName += ` - ${urlObj.hostname}`;
     }
 
-    const safePageContext = pageContext || {};
-    const safeCourseContext = courseContext || {};
-    const existingSessionMeta = safePageContext.session_meta || {};
-
-    const finalClassCode =
-      safeCourseContext.class_code ||
-      existingSessionMeta.class_code ||
-      existingSessionMeta.kelas ||
-      null;
-
-    safePageContext.session_meta = {
-      ...existingSessionMeta,
+    const sessionMeta = {
       display_name: displayName,
-      class_code: finalClassCode
+      class_code: autoClassCode || pageContext?.session_meta?.class_code || 'Umum',
+      moodle_user_id: moodleContext?.moodle_user_id || null,
+      username: moodleContext?.username || null,
+      email: moodleContext?.email || null,
+      course_id: moodleContext?.course_id || courseContext?.course_id || null,
+      course_title: moodleContext?.course_title || courseContext?.course_title || null,
+      enrolled_courses: moodleContext?.enrolled_courses || courseContext?.enrolled_courses || []
     };
 
-    safePageContext.safety_state = {
-      warnings: 0,
-      locked: false,
-      burnout_count: 0
+    const finalPageContext = {
+      ...(pageContext || {}),
+      session_meta: sessionMeta
     };
 
     const sessionData = {
       project_id: projectId,
       session_key: sessionKey,
-      student_alias: studentAlias || displayName,
-      source_url: sourceUrl || '',
-      course_context: {
-        ...safeCourseContext,
-        class_code: finalClassCode
-      },
-      page_context: safePageContext
+      source_url: sourceUrl || null,
+      page_context: finalPageContext,
+      course_context: courseContext || null,
+      student_alias: displayName
     };
 
     const newSession = await chatModel.createSession(sessionData);
@@ -120,6 +132,12 @@ const chatController = {
     const { sessionId } = req.params;
     const usage = aiRateLimitService.getStatus(sessionId);
     return response.success(res, 'Status penggunaan AI berhasil diambil', usage, 200);
+  }),
+
+  getAiQueueStatus: asyncHandler(async (req, res) => {
+    return response.success(res, 'Status antrean AI berhasil diambil', {
+      queue: aiQueueService.getStatus()
+    }, 200);
   }),
 
   getSessionById: asyncHandler(async (req, res) => {

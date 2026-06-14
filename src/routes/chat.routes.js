@@ -4,6 +4,8 @@ const chatController = require('../controllers/chat.controller');
 
 router.post('/session', chatController.createSession);
 router.post('/send', chatController.sendMessage);
+router.get('/ai-queue/status', chatController.getAiQueueStatus);
+
 router.get('/session/:sessionId', chatController.getSessionById);
 router.get('/history/:sessionId', chatController.getHistory);
 router.get('/ai-usage/:sessionId', chatController.getAiUsage);

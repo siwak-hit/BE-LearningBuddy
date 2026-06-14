@@ -140,15 +140,16 @@ const moderationService = {
     // =========================
     // PRIORITAS 2: Kata Kasar / Profanity
     // =========================
-    if (badwords.flag(originalMessage) || badwords.flag(normalizedMessage)) {
+    const profanityHit = detectWholeWordProfanity(originalMessage, normalizedMessage);
+    if (profanityHit.isFlagged) {
       return {
         isFlagged: true,
         type: 'profanity',
         severity: 'high',
         responseMessage:
           'Aku paham kamu mungkin sedang kesal. Coba gunakan bahasa yang lebih sopan ya, supaya aku bisa bantu belajarmu dengan baik.',
-        censoredText: badwords.censor(originalMessage),
-        detectedWords: badwords.badwords(originalMessage)
+        censoredText: safeCensor(originalMessage, profanityHit.detectedWords),
+        detectedWords: profanityHit.detectedWords
       };
     }
 
@@ -220,6 +221,67 @@ function containsAny(text, words) {
 
 function escapeRegex(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+
+function detectWholeWordProfanity(originalMessage = '', normalizedMessage = '') {
+  const normalized = normalizeText(originalMessage || normalizedMessage || '');
+
+  // Query edukasi yang sering kena false positive dari library karena substring:
+  // "media sosial" mengandung "sial", "detail" mengandung "tai".
+  const educationalWhitelist = [
+    /\bmedia\s+sosial\b/i,
+    /\bsosial\s+media\b/i,
+    /\bdetail\b/i,
+    /\bjelaskan\s+lebih\s+detail\b/i,
+    /\bapa\s+itu\b/i
+  ];
+
+  if (educationalWhitelist.some((pattern) => pattern.test(originalMessage))) {
+    // Tetap cek kata kasar eksplisit sebagai kata utuh, bukan substring.
+    const explicit = explicitProfanityWords().filter((word) => {
+      const re = new RegExp(`\\b${escapeRegex(normalizeText(word))}\\b`, 'i');
+      return re.test(normalized);
+    });
+    return { isFlagged: explicit.length > 0, detectedWords: explicit };
+  }
+
+  const explicit = explicitProfanityWords().filter((word) => {
+    const re = new RegExp(`\\b${escapeRegex(normalizeText(word))}\\b`, 'i');
+    return re.test(normalized);
+  });
+
+  if (explicit.length > 0) return { isFlagged: true, detectedWords: explicit };
+
+  // Hindari badwords.flag() langsung karena dia cenderung substring-match.
+  // Ambil daftar badwords dari library bila tersedia, lalu cek sebagai kata utuh.
+  try {
+    const list = Array.isArray(badwords.words) ? badwords.words : [];
+    const detected = list
+      .map((word) => normalizeText(word))
+      .filter(Boolean)
+      .filter((word) => new RegExp(`\\b${escapeRegex(word)}\\b`, 'i').test(normalized));
+
+    if (detected.length > 0) return { isFlagged: true, detectedWords: [...new Set(detected)] };
+  } catch (_) {}
+
+  return { isFlagged: false, detectedWords: [] };
+}
+
+function explicitProfanityWords() {
+  return [
+    'anjing', 'bangsat', 'kontol', 'memek', 'goblok', 'tolol', 'bego', 'babi',
+    'tai', 'taik', 'sialan', 'kampret', 'brengsek', 'jancok', 'cok', 'asu'
+  ];
+}
+
+function safeCensor(text = '', words = []) {
+  let result = String(text || '');
+  words.forEach((word) => {
+    const re = new RegExp(`\\b${escapeRegex(word)}\\b`, 'gi');
+    result = result.replace(re, '***');
+  });
+  return result;
 }
 
 module.exports = moderationService;

@@ -7,7 +7,9 @@ function detectAnswerMode({ message, intent, elementContext, hasTemplateContext 
   const isElementDirectQuestion = hasMention || Boolean(elementContext);
 
   // Deteksi tanya deadline khusus
-  if (intent === 'tanya_deadline' || intent === 'cek_tugas_belum') return 'deadline';
+  if (intent === 'tanya_deadline' || intent === 'cek_tugas_belum' || intent === 'cek_deadline_hari_ini' || intent === 'cek_deadline_terdekat') {
+    return 'deadline';
+  }
 
   const proceduralIntents = ['bantuan_login', 'navigasi_kursus', 'akses_materi', 'bantuan_tugas', 'bantuan_kuis', 'bantuan_umum', 'tutorial_steps'];
   const isProcedural = proceduralIntents.includes(intent) || /(cara|langkah|tahapan|gimana|bagaimana|tutorial|urutan)/i.test(message);
@@ -20,130 +22,100 @@ function detectAnswerMode({ message, intent, elementContext, hasTemplateContext 
 function detectMaterialFocus(message = '') {
   const msg = String(message || '').toLowerCase();
 
-  if (/(dampak|pengaruh|efek|akibat|positif|negatif|manfaat|risiko|bahaya)/i.test(msg)) {
-    return 'dampak';
-  }
-
-  if (/(apa itu|pengertian|definisi|maksud dari|artinya)/i.test(msg)) {
-    return 'pengertian';
-  }
-
-  if (/(jenis|macam|kategori|contoh)/i.test(msg)) {
-    return 'jenis';
-  }
-
-  if (/(cara mencegah|pencegahan|menghindari|solusi|mengatasi)/i.test(msg)) {
-    return 'solusi';
-  }
+  if (/(dampak|pengaruh|efek|akibat|positif|negatif|manfaat|risiko|bahaya)/i.test(msg)) return 'dampak';
+  if (/(apa itu|pengertian|definisi|maksud dari|artinya)/i.test(msg)) return 'pengertian';
+  if (/(cara|langkah|tahapan|metode|prosedur)/i.test(msg)) return 'prosedur';
+  if (/(contoh|seperti apa|misalnya)/i.test(msg)) return 'contoh';
+  if (/(kenapa|mengapa|alasan|penyebab)/i.test(msg)) return 'alasan';
+  if (/(siapa|tokoh|penemu)/i.test(msg)) return 'tokoh';
+  if (/(kapan|waktu|tahun|tanggal)/i.test(msg)) return 'waktu';
+  if (/(dimana|tempat|lokasi)/i.test(msg)) return 'tempat';
 
   return 'umum';
 }
 
 const promptService = {
-  // Pastikan parameter responseMode = 'default' ada di sini
-  buildPrompt(message, contextString, pageContext, intent, elementContext = null, templateContextString = '', responseMode = 'default') {
-    const safeContext = (contextString || '').substring(0, MAX_CONTEXT_CHARS);
-    const pageTitle = pageContext?.title || 'Halaman VClass';
+  // Tambahan parameter lmsContext di bagian akhir
+  buildPrompt(message, contextString, pageContext, intent, elementContext = null, templateContextString = '', responseMode = 'system', lmsContext = null) {
+    const safeContext = String(contextString || '').substring(0, MAX_CONTEXT_CHARS);
+    const pageTitle = pageContext?.page_title || 'Materi LMS';
+    const studentName = pageContext?.session_meta?.display_name || 'Siswa';
+    const classCode = pageContext?.session_meta?.class_code || 'Tidak diketahui';
 
-    const hasTemplateContext = !!templateContextString;
-    const mode = detectAnswerMode({ message, intent, elementContext, hasTemplateContext });
+    const answerMode = detectAnswerMode({ message, intent, elementContext, hasTemplateContext: Boolean(templateContextString) });
+    const materialFocus = detectMaterialFocus(message);
+
+    let modeRules = '';
+    if (answerMode === 'element_explanation') {
+      modeRules = `1. FOKUS: Kamu sedang ditanya tentang elemen spesifik di layar siswa (teks/tombol yang dia klik).\n2. JELASKAN elemen tersebut sesuai fungsi atau maknanya dalam e-learning.`;
+    } else if (answerMode === 'tutorial_steps') {
+      modeRules = `1. FOKUS: Berikan panduan langkah-demi-langkah (step-by-step).\n2. Gunakan bullet/numbering agar mudah dibaca.\n3. Jangan terlalu panjang, langsung ke intinya.`;
+    } else if (answerMode === 'deadline') {
+      modeRules = `1. FOKUS: Ingatkan siswa tentang tenggat waktu (deadline).\n2. Gunakan data LMS (jika ada) atau beritahu siswa cara mengeceknya di Moodle.`;
+    } else {
+      const focusRules = {
+        'pengertian': 'Fokus berikan definisi dan arti konsepnya.',
+        'dampak': 'Fokus jelaskan dampak positif/negatif atau akibat dari hal tersebut.',
+        'contoh': 'Berikan contoh-contoh nyata yang mudah dipahami.',
+        'alasan': 'Fokus jelaskan "mengapa" hal itu bisa terjadi.',
+        'tokoh': 'Fokus pada siapa yang terlibat atau penemunya.',
+        'prosedur': 'Jelaskan cara atau tahapannya secara ringkas.',
+        'waktu': 'Sebutkan kapan peristiwa itu terjadi.',
+        'tempat': 'Sebutkan di mana lokasi terjadinya.',
+        'umum': 'Jelaskan secara komprehensif tapi mudah dipahami.'
+      };
+
+      const relatedButMayNotBeInMaterial = ['dampak', 'contoh', 'alasan'].includes(materialFocus);
+
+      modeRules = `1. FOKUS UTAMA: Jawab menggunakan CONTEXT MATERI yang diberikan.\n2. TONE: Ramah, mendukung, seperti asisten belajar seumurannya (gunakan 'aku'/'kamu').\n3. FORMAT: Gunakan paragraf pendek, hindari blok teks panjang. Gunakan bold untuk poin penting.\n4. KELENGKAPAN: Jika context tidak cukup, jelaskan sebatas yang ada, jangan mengarang.
+
+    ${focusRules[materialFocus]}
+
+${relatedButMayNotBeInMaterial ? `
+KONDISI KHUSUS:
+- Pertanyaan siswa masih berkaitan dengan topik materi, tetapi kemungkinan tidak dijelaskan langsung di materi guru.
+- Jawaban HARUS diawali dengan: "Bagian ini belum dijelaskan langsung di materi yang diberikan guru, tapi masih berkaitan dengan topik ini."
+- Setelah itu jawab secara umum, singkat, aman, dan tidak melebar.
+` : ''}`;
+    }
 
     let elementString = '';
     if (elementContext) {
-      elementString = `\nELEMEN YANG DITANYAKAN:\n- Nama: ${elementContext.name}\n- Tag: ${elementContext.tag}\n`;
+      elementString = `\nELEMEN YANG SEDANG DILIHAT SISWA:\n- Teks: "${elementContext.text}"\n- Tag HTML: <${elementContext.tagName}>\n`;
     }
 
-    let modeRules = '';
-
-    if (mode === 'element_explanation') {
-      modeRules = `ATURAN WAJIB (MODE PENJELASAN ELEMEN UI):
-1. Kamu sedang menjelaskan FUNGSI dari sebuah elemen UI (tombol/form/tabel).
-2. Jawab SINGKAT, jelas, praktis langsung ke inti fungsi. ${responseMode === 'short' ? 'WAJIB jawab maksimal dalam 1 kalimat saja tanpa basa-basi.' : 'Maksimal 1-2 paragraf pendek.'} DILARANG memakai analogi.
-3. Output berupa teks biasa (Markdown diperbolehkan).`;
-
-    } else if (mode === 'tutorial_steps') {
-      modeRules = `ATURAN WAJIB (MODE TUTORIAL LANGKAH-LANGKAH):
-1. Kamu WAJIB merespons HANYA dalam format JSON murni terstruktur (tanpa markdown backticks).
-2. FOKUS PADA TUJUAN UTAMA: Pecah proses menjadi langkah kecil yang spesifik dan logis. ${responseMode === 'short' ? 'User meminta jawaban singkat, buat bagian "description" maksimal 1 kalimat padat per langkah.' : ''}
-3. FOKUS SCOPE: Jangan tambahkan langkah di luar tujuan utama user KECUALI diminta.
-4. Jika elemen yang tersedia hanya 1 form besar, gunakan \`element_ref\` yang sama pada setiap langkah yang membutuhkan input di form tersebut.
-5. Format JSON WAJIB seperti ini:
-{
-  "answer_mode": "tutorial_steps",
-  "answer_text": "Berikut adalah panduan langkah demi langkah:",
-  "steps": [
-    { "step_number": 1, "title": "Judul langkah spesifik", "description": "Instruksi", "element_ref": "@namaElemen" }
-  ]
-}`;
-
-    } else if (mode === 'deadline') {
-      const tasks = pageContext?.userTasks || [];
-      if (tasks.length === 0) {
-        modeRules = `ATURAN WAJIB (MODE DEADLINE):
-1. Kamu WAJIB menjawab HANYA dengan: "Aku belum bisa melihat deadline tugas secara langsung dari halaman ini. Coba buka halaman dashboard/timeline VClass atau tanyakan ke guru/admin."
-2. DILARANG KERAS mengarang tugas atau jadwal.`;
-      } else {
-        modeRules = `ATURAN WAJIB (MODE DEADLINE):
-1. Berikut adalah data tugas user saat ini: ${JSON.stringify(tasks)}.
-2. Jawab berdasarkan data tersebut. Sebutkan mana yang belum selesai dan kapan deadlinenya.
-3. DILARANG KERAS mengarang tugas di luar data yang diberikan.`;
-      }
-
-    } else {
-      const materialFocus = detectMaterialFocus(message);
-
-      const focusRules = {
-        dampak: `FOKUS PERTANYAAN: DAMPAK / PENGARUH.
-    - Jawaban HARUS membahas dampak penggunaan media sosial.
-    - Jika konteks tersedia, utamakan dampak yang ada di materi.
-    - Boleh bagi menjadi "dampak positif" dan "dampak negatif".
-    - Jangan mengulang panjang pengertian media sosial. Definisi maksimal 1 kalimat pembuka saja.`,
-
-        pengertian: `FOKUS PERTANYAAN: PENGERTIAN.
-    - Jawaban HARUS menjelaskan definisi/pengertian.
-    - Boleh beri contoh singkat agar mudah dipahami siswa SMP.
-    - Jangan membahas dampak terlalu jauh kecuali hanya sebagai tambahan singkat.`,
-
-        jenis: `FOKUS PERTANYAAN: JENIS / CONTOH.
-    - Jawaban HARUS menyebutkan jenis, macam, atau contoh.
-    - Gunakan daftar singkat agar mudah dibaca.
-    - Jangan fokus ke pengertian panjang.`,
-
-        solusi: `FOKUS PERTANYAAN: SOLUSI / PENCEGAHAN.
-    - Jawaban HARUS berisi langkah pencegahan, solusi, atau cara menghindari.
-    - Buat praktis dan mudah dilakukan siswa.`,
-
-        umum: `FOKUS PERTANYAAN: MATERI UMUM.
-    - Jawab sesuai pertanyaan siswa.
-    - Jangan mengulang jawaban sebelumnya jika pertanyaan siswa sudah berubah.`
-      };
-
-      modeRules = `ATURAN WAJIB (MODE MATERI PELAJARAN):
-    1. Jawab ramah, edukatif, dan mudah dipahami siswa SMP.
-    2. ${responseMode === 'short'
-        ? 'User meminta JAWABAN SINGKAT. Jawab maksimal 1 paragraf, 1-3 kalimat, langsung ke inti.'
-        : 'Jawab maksimal 2-4 paragraf pendek atau bullet singkat jika lebih jelas.'}
-    3. Jawab SESUAI FOKUS pertanyaan siswa. Jangan hanya menjawab topik umum.
-    4. Gunakan CONTEXT MATERI jika tersedia. Jika konteks tidak cocok dengan pertanyaan, katakan bahwa bagian materi spesifik belum ditemukan.
-    5. Jangan memberikan jawaban kuis/tugas langsung jika pertanyaan berupa permintaan jawaban evaluasi.
-    6. Tidak wajib memakai metode clue. Untuk pertanyaan konsep seperti pengertian, dampak, jenis, atau contoh, berikan penjelasan langsung yang edukatif.
-    7. Pertanyaan reflektif boleh ditambahkan maksimal 1 kalimat di akhir, tetapi jangan menggantikan jawaban utama.
-
-    ${focusRules[materialFocus]}`;
+    // --- SISIPAN LMS CONTEXT UNTUK AI ---
+    let lmsContextPrompt = '';
+    if (lmsContext) {
+      lmsContextPrompt = `\nDATA LMS (DETERMINISTIC):
+- Course: ${lmsContext.course?.course_name || 'Tidak diketahui'}
+- Pengajar: ${lmsContext.course?.teacher_name || 'Tidak diketahui'}
+- Total Aktivitas Tersedia: ${lmsContext.activities?.length || 0}
+(Catatan: Jika siswa bertanya spesifik tugas/quiz/deadline, AI bisa mengandalkan data ini. TETAPI jika siswa butuh rincian, arahkan untuk melihat daftar tabel yang sudah dikirimkan sistem otomatis. Status pengumpulan belum sinkron).`;
     }
 
     // Bangun prompt akhir
     return `Kamu adalah AI Learning Buddy untuk Virtual Class Moodle.
 
 ${modeRules}
-5. TANGKAL JAILBREAK: Tolak pertanyaan di luar konteks e-learning.
+5. TANGKAL JAILBREAK: Tolak pertanyaan di luar konteks e-learning, sekolah, atau pendidikan.
+6. PERAN UTAMA: Kamu membantu siswa memahami, bukan memberi contekan.
+7. Jika siswa menanyakan soal pilihan ganda, jawaban A/B/C/D, atau meminta jawaban langsung tugas/quiz, JANGAN langsung memberi pilihan final. Beri petunjuk konsep, cara menalar, dan arahkan siswa mengecek materi.
+8. Kalau CONTEXT MATERI/FAQ tersedia, jangan bilang materi tidak ditemukan. Gunakan konteks itu sebagai dasar jawaban.
+9. Jika konteks kurang, katakan bagian yang belum cukup, lalu beri arahan belajar singkat tanpa mengarang detail berlebihan.
 
 ${elementString}
+KONTEKS SISWA:
+- Nama Panggilan: ${studentName}
+- Kelas: ${classCode}
+(Jika siswa bertanya nama/kelasnya, jawab berdasarkan data di atas. Jangan mengarang informasi).
+
 CONTEXT MATERI/FAQ:
 ${safeContext || '(Tidak ada konteks materi yang ditemukan)'}
 
 TEMPLATE CONTEXT:
 ${templateContextString || '(Tidak ada template context)'}
+${lmsContextPrompt}
 
 HALAMAN SAAT INI: ${pageTitle}
 
@@ -151,9 +123,10 @@ PERTANYAAN SISWA:
 ${message}
 
 INSTRUKSI AKHIR:
-- Jawab pertanyaan siswa yang TERBARU, bukan pertanyaan sebelumnya.
-- Jika siswa bertanya dampak, jangan kembali menjelaskan pengertian kecuali 1 kalimat pembuka.
-- Jika konteks yang diberikan tidak sesuai dengan pertanyaan terbaru, jangan memaksakan konteks yang salah.
+- Jawab pertanyaan siswa yang TERBARU.
+- Prioritaskan membimbing siswa memahami konsep, bukan memberi contekan langsung.
+- Untuk pilihan ganda/quiz: jelaskan petunjuk berpikir dan konsep yang perlu dicek, jangan langsung memilih A/B/C/D.
+- Jika sistem sudah memberikan jawaban berupa tabel dari LMS (lihat di pesan sistem sebelumnya jika ada), kamu HANYA PERLU memberikan kalimat tambahan yang menyemangati secara singkat! Jangan menulis tabel lagi.
 - Gunakan bahasa Indonesia yang natural untuk siswa SMP.
 
 JAWABAN:`;

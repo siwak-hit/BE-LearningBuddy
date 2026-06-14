@@ -13,12 +13,28 @@ const ruleService = require('./rule.service');
 const pageTemplateService = require('../template/page-template.service');
 const activityModel = require('../../models/activity.model');
 const lmsRouteModel = require('../../models/lmsRoute.model');
+const aiResponseCacheModel = require('../../models/aiResponseCache.model');
+const aiQueueService = require('../ai/aiQueue.service');
+const lmsContextService = require('../moodle/lms-context.service');
 
 function safeParseObject(value, fallback = {}) {
   if (!value) return fallback;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value) || fallback; } catch (_) { return fallback; }
 }
+
+
+const LMS_INTENTS = [
+  'cek_tugas_belum_selesai', 'cek_deadline_hari_ini', 'cek_deadline_terdekat',
+  'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_aktivitas_course',
+  'cek_pengajar_course', 'cek_course_saya', 'buka_aktivitas', 'tanya_email', 'tanya_username'
+];
+
+const QUICK_VISUAL_GUIDE_INTENTS = [
+  'bantuan_login', 'bantuan_dashboard', 'navigasi_kursus', 'akses_materi',
+  'bantuan_tugas', 'bantuan_kumpul_tugas', 'bantuan_kuis', 'bantuan_quiz',
+  'bantuan_forum', 'bantuan_logout', 'bantuan_lihat_nilai', 'tutorial_steps'
+];
 
 function escapeHtml(value = '') {
   return String(value)
@@ -48,6 +64,651 @@ function normalizeText(value = '') {
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function canonicalizeRetrievalQuery(message = '') {
+  const text = String(message || '').trim();
+  const normalized = normalizeText(text);
+
+  if (/\b(sosial media|sosmed|media sosial)\b/i.test(normalized)) {
+    if (/\b(dampak|pengaruh|efek|akibat|positif|negatif|manfaat|risiko|bahaya)\b/i.test(normalized)) return 'dampak media sosial';
+    if (/\b(contoh|jenis|macam|aplikasi)\b/i.test(normalized)) return 'jenis dan contoh media sosial';
+    return 'apa itu media sosial';
+  }
+
+  if (/\b(hoax|hoaks)\b/i.test(normalized)) return 'apa itu hoax';
+  if (/\b(cyberbullying|perundungan online|bullying online)\b/i.test(normalized)) return 'apa itu cyberbullying';
+
+  return text;
+}
+
+function looksLikeMultipleChoiceQuestion(message = '') {
+  const raw = String(message || '');
+  return /(^|\n|\s)([A-Da-d])[\).]/.test(raw) || /\b(pilihan ganda|jawaban yang benar|pilih jawaban|opsi a|opsi b|opsi c|opsi d)\b/i.test(raw);
+}
+
+function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
+  const actions = [];
+  const pdfActions = [];
+  const moodleMaterials = [];
+  const seenPdf = new Set();
+  const moodleByUrl = new Map();
+  const MAX_MOODLE_MATERIALS = 3;
+
+  (retrievalResults || []).slice(0, 10).forEach((item, index) => {
+    const metadata = item.metadata || {};
+    const fileUrl = item.file_url || item.url || item.source_url || metadata.file_url || metadata.source_url || metadata.url;
+    const fileType = item.file_type || metadata.file_type || metadata.content_type || '';
+    const title = item.title || metadata.module_name || metadata.title || item.topic || `Materi ${index + 1}`;
+    const pageNumber = Number(item.page_number || metadata.page_number || metadata.page || 1) || 1;
+    const highlightText = item.highlight_text || metadata.highlight_text || item.chunk_text || item.content || '';
+    const sourceOrigin = metadata.source_origin || item.source_origin || '';
+    const modname = metadata.modname || item.modname || '';
+    const contentSnippet = String(item.content || item.chunk_text || highlightText || '').replace(/\s+/g, ' ').trim();
+
+    if (!fileUrl) return;
+
+    const isPdf = String(fileUrl).toLowerCase().includes('.pdf') || String(fileType).toLowerCase().includes('pdf');
+    const isMoodle = sourceOrigin === 'moodle' || /\/mod\/(page|resource|book)\/view\.php/i.test(String(fileUrl)) || String(modname).length > 0;
+
+    if (isMoodle) {
+      if (!moodleByUrl.has(fileUrl) && moodleMaterials.length >= MAX_MOODLE_MATERIALS) {
+        return;
+      }
+
+      if (!moodleByUrl.has(fileUrl)) {
+        const material = {
+          title,
+          topic: metadata.section_name || item.topic || '',
+          url: fileUrl,
+          source_url: fileUrl,
+          file_type: isPdf ? 'pdf' : (fileType || 'html'),
+          modname: modname || (isPdf ? 'resource' : 'page'),
+          class_code: metadata.class_code || '',
+          course_id: metadata.moodle_course_id || null,
+          module_id: metadata.module_id || null,
+          preview: contentSnippet.slice(0, 260),
+          content: contentSnippet,
+          score: item.score || 0,
+          debug_score: item.debug_score || null,
+          snippets: contentSnippet ? [contentSnippet] : []
+        };
+        moodleByUrl.set(fileUrl, material);
+        moodleMaterials.push(material);
+      } else if (contentSnippet) {
+        const material = moodleByUrl.get(fileUrl);
+        const normalized = contentSnippet.toLowerCase();
+        const duplicate = (material.snippets || []).some((old) => String(old || '').toLowerCase() === normalized);
+        if (!duplicate && material.snippets.length < 8) material.snippets.push(contentSnippet);
+        material.content = material.snippets.join('\n\n');
+      }
+    }
+
+    if (isPdf && !seenPdf.has(fileUrl)) {
+      seenPdf.add(fileUrl);
+      pdfActions.push({
+        type: 'open_pdf_viewer',
+        label: `Buka sumber PDF: ${title}`.slice(0, 80),
+        url: fileUrl,
+        page_number: pageNumber,
+        query,
+        highlight_text: highlightText,
+        content: item.content || item.chunk_text || ''
+      });
+    }
+  });
+
+  if (moodleMaterials.length > 0) {
+    actions.push({
+      type: 'open_moodle_materials',
+      label: moodleMaterials.length > 1 ? `Lihat ${moodleMaterials.length} materi terkait` : 'Lihat materi',
+      materials: moodleMaterials.slice(0, MAX_MOODLE_MATERIALS)
+    });
+  }
+
+  return [...actions, ...pdfActions];
+}
+
+function isLearningMaterialQuestion(message = '', detectedIntent = '') {
+  const text = normalizeText(message);
+  if (['penjelasan_materi', 'general_learning_help'].includes(String(detectedIntent || ''))) return true;
+  return /\b(apa itu|pengertian|definisi|maksud|jelaskan|contoh|dampak|manfaat|jenis|ciri|cara|fungsi|kenapa|mengapa|bagaimana|bedanya|perbedaan)\b/i.test(String(message || ''))
+    || /\b(media sosial|sosial media|sosmed|hoax|hoaks|cyberbullying|cms|spreadsheet|vlookup|hlookup|rumus|informatika)\b/.test(text);
+}
+
+function isOpenMaterialRequest(message = '') {
+  const text = normalizeText(message);
+  return /\b(buka|lihat|tampilkan|open)\b/.test(text) && /\b(materi|modul|bahan|bacaan|pertemuan|minggu)\b/.test(text);
+}
+
+function buildCoachingContext(contextString = '') {
+  return `
+[ATURAN JAWABAN MATERI]
+- Jawab hanya berdasarkan KONTEKS MATERI di bawah. Kalau konteks tidak cukup, bilang materi belum cukup jelas untuk menjawab.
+- Jangan langsung memberi jawaban final yang kaku. Bantu siswa berpikir dengan contoh dekat, pertanyaan pancingan ringan, lalu simpulkan singkat.
+- Gaya kelas 8 SMP: ramah, pendek, tidak bertele-tele, maksimal 2-4 paragraf pendek.
+- Setelah membantu berpikir, arahkan siswa untuk membuka tombol "Lihat materi" bila ingin membaca sumbernya.
+- Jika konteks hanya menyebut istilah sebagai contoh singkat, jangan ubah menjadi definisi besar. Jelaskan batasnya: materi hanya menyinggung istilah itu sebagai contoh.
+- Untuk soal pilihan ganda/quiz, jangan memilih opsi A/B/C/D dan jangan mengulang teks opsi jawaban.
+[/ATURAN JAWABAN MATERI]
+
+[KONTEKS MATERI]
+${contextString || 'Tidak ada konteks spesifik yang ditemukan.'}
+[/KONTEKS MATERI]`;
+}
+
+function buildMaterialSystemPrompt({ hasRetrieval = false, hasCache = false } = {}) {
+  if (hasCache) return 'Aku menemukan jawaban yang pernah dijelaskan sebelumnya untuk pertanyaan serupa.';
+  if (hasRetrieval) {
+    return 'Aku nemu materi yang cocok. Kalau kamu mau penjelasan yang lebih enak, pilih **AI Singkat** atau **AI Detail**. Kamu juga bisa buka materinya lewat tombol di bawah.';
+  }
+  return 'Aku belum nemu materi yang pas. Coba pakai kata kunci yang lebih spesifik, atau pastikan materi Moodle sudah disinkronkan oleh admin/guru.';
+}
+
+function buildQuizCopyPasteResponse({ studentName = '', retrievalResults = [] } = {}) {
+  const name = String(studentName || 'teman').trim() || 'teman';
+  const sourceHint = retrievalResults.length > 0
+    ? '\n\nAku sudah menemukan materi yang berkaitan. Buka tombol **Lihat materi** kalau mau membaca sumbernya dulu.'
+    : '';
+
+  return `Halo **${escapeHtml(name)}**, uppss... sepertinya kamu sedang mengerjakan soal kuis ya.\n\nAku diprogram untuk **tidak memilihkan jawaban langsung** atau menebak opsi A/B/C/D. Tapi aku tetap bisa bantu kamu mikir.\n\nCoba pahami inti konsepnya dulu: lihat fungsi/kegunaan istilah yang ditanyakan, lalu cocokkan dengan pilihan yang maknanya paling mendekati. Jangan fokus ke huruf opsinya, fokus ke arti dan konteksnya.${sourceHint}`;
+}
+
+function buildCacheLookup({ projectId, message, retrievalResults = [] }) {
+  const normalizedQuestion = aiResponseCacheModel.normalizeQuestion
+    ? aiResponseCacheModel.normalizeQuestion(message)
+    : normalizeText(message);
+  const contextHash = buildContextHash(retrievalResults);
+  const cacheKey = aiResponseCacheModel.buildCacheKey
+    ? aiResponseCacheModel.buildCacheKey(projectId, normalizedQuestion, contextHash)
+    : aiResponseCacheModel.hashText([projectId, normalizedQuestion, contextHash].join('|'));
+
+  return { normalizedQuestion, contextHash, cacheKey };
+}
+
+async function findCachedMaterialAnswer({ projectId, message, retrievalResults = [], intent }) {
+  try {
+    if (!projectId || !message) return null;
+    const { cacheKey, contextHash } = buildCacheLookup({ projectId, message, retrievalResults });
+    const exact = await aiResponseCacheModel.findByKey?.(projectId, cacheKey);
+    if (exact) {
+      await aiResponseCacheModel.incrementHit?.(exact.id).catch(() => {});
+      return exact;
+    }
+
+    const similar = await aiResponseCacheModel.findBestSimilar?.(projectId, message, {
+      intent,
+      contextHash,
+      threshold: 0.72
+    });
+    if (similar) {
+      await aiResponseCacheModel.incrementHit?.(similar.id).catch(() => {});
+      return similar;
+    }
+  } catch (error) {
+    console.warn('[chat.service] Cache lookup gagal:', error.message);
+  }
+  return null;
+}
+
+async function saveMaterialAnswerCache({ projectId, message, answer, retrievalResults = [], intent, usedModel }) {
+  try {
+    if (!projectId || !message || !answer || looksLikeMultipleChoiceQuestion(message)) return null;
+    const { normalizedQuestion, contextHash, cacheKey } = buildCacheLookup({ projectId, message, retrievalResults });
+    if (!normalizedQuestion || normalizedQuestion.length < 3) return null;
+
+    return aiResponseCacheModel.upsertCache?.({
+      project_id: projectId,
+      cache_key: cacheKey,
+      question: message,
+      normalized_question: normalizedQuestion,
+      answer,
+      response_source: 'ai_cache',
+      intent,
+      source_type: 'document_chunk',
+      context_hash: contextHash,
+      model: usedModel || null,
+      expires_at: getExpiresAt()
+    });
+  } catch (error) {
+    console.warn('[chat.service] Gagal menyimpan cache jawaban AI:', error.message);
+    return null;
+  }
+}
+
+// ============================================================
+// STATIC IMAGE TUTORIALS
+// Sumber gambar: FE/public/DETAIL/... (tidak bergantung page_templates).
+// Backend hanya mengirim metadata langkah + URL gambar. Rendering carousel ada di FE.
+// ============================================================
+function publicAssetPath(...segments) {
+  return '/' + segments
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(String(segment)).replace(/%2F/g, '/'))
+    .join('/');
+}
+
+function detailImage(...segments) {
+  return publicAssetPath('DETAIL', ...segments);
+}
+
+const ENTRY_POINT_IMAGE = detailImage('ENTRY POINT.png');
+
+const STATIC_TUTORIALS = {
+  buat_forum: {
+    key: 'buat_forum',
+    title: 'Cara Membuat Forum Diskusi',
+    shortTitle: 'Buat Forum',
+    intent: 'tutorial_buat_forum',
+    intro: 'Tutorial ini menjelaskan cara membuat topik diskusi/forum baru di VClass.',
+    note: 'Catatan: nama forum, topik, tugas, dan isi teks pada gambar hanya contoh. Bentuk tombol dan elemen mengikuti tampilan VClass.',
+    steps: [
+      {
+        title: 'Buka forum dari course',
+        text: 'Klik salah satu forum pada course kamu. Contoh pada gambar adalah forum “Diskusi: Keuntungan CMS”.',
+        image: ENTRY_POINT_IMAGE
+      },
+      {
+        title: 'Klik Tambahkan topik diskusi',
+        text: 'Klik tombol “Tambahkan topik diskusi” untuk membuat jawaban/forum baru.',
+        image: detailImage('TUTORIAL BUAT FORUM', '1.png')
+      },
+      {
+        title: 'Isi kolom Subjek',
+        text: 'Isi kolom subjek sesuai instruksi guru. Jika tidak ada format khusus, kamu bisa memakai format nama_kelas_minggu, contoh: AndiPratama_8A_M1.',
+        image: detailImage('TUTORIAL BUAT FORUM', '2.png')
+      },
+      {
+        title: 'Tulis jawaban pada kolom Pesan',
+        text: 'Tuliskan jawaban diskusi kamu pada kolom pesan. Pastikan jawabannya sesuai pertanyaan atau instruksi guru.',
+        image: detailImage('TUTORIAL BUAT FORUM', '3.png')
+      },
+      {
+        title: 'Kirim ke forum',
+        text: 'Kalau jawaban sudah benar, klik tombol “Kirim ke forum”.',
+        image: detailImage('TUTORIAL BUAT FORUM', '4.png')
+      },
+      {
+        title: 'Pastikan topik berhasil muncul',
+        text: 'Setelah terkirim, cek tabel daftar diskusi. Jika postinganmu belum muncul, kemungkinan ada kolom wajib yang belum diisi atau koneksi belum stabil.',
+        image: detailImage('TUTORIAL BUAT FORUM', '5.png'),
+        note: 'Perhatikan juga instruksi guru: apakah syaratnya membuat topik baru atau membalas topik teman. Jika disebut minimal 3 forum/diskusi, pastikan jumlah yang diminta sudah terpenuhi.'
+      }
+    ]
+  },
+
+  reply_forum: {
+    key: 'reply_forum',
+    title: 'Cara Reply/Balas Diskusi Forum',
+    shortTitle: 'Reply Forum',
+    intent: 'tutorial_reply_forum',
+    intro: 'Tutorial ini menjelaskan cara membalas diskusi/forum yang sudah dibuat di VClass.',
+    note: 'Catatan: nama diskusi dan isi pesan pada gambar hanya contoh. Ikuti instruksi guru untuk isi jawaban sebenarnya.',
+    steps: [
+      {
+        title: 'Pilih diskusi yang ingin dibalas',
+        text: 'Cek daftar diskusi yang ingin kamu balas. Setelah ketemu, klik judul diskusinya.',
+        image: detailImage('TUTORIAL REPLY FORUM', '1.png')
+      },
+      {
+        title: 'Klik tombol Balas',
+        text: 'Setelah halaman diskusi terbuka, klik tombol “Balas” pada bagian kanan bawah pesan.',
+        image: detailImage('TUTORIAL REPLY FORUM', '2.png')
+      },
+      {
+        title: 'Isi subjek dan pesan balasan',
+        text: 'Isi subjek dan pesan balasanmu. Gunakan bahasa yang sopan dan sesuai topik diskusi.',
+        image: detailImage('TUTORIAL REPLY FORUM', '3.png')
+      },
+      {
+        title: 'Pastikan balasan tampil',
+        text: 'Setelah membalas diskusi, pastikan pesanmu tampil sebagai balasan di bawah diskusi tersebut.',
+        image: detailImage('TUTORIAL REPLY FORUM', '4.png'),
+        note: 'Jika guru memberi syarat minimal balasan atau minimal jumlah siswa yang ikut diskusi, cek instruksinya terlebih dahulu sebelum lanjut ke aktivitas berikutnya.'
+      }
+    ]
+  },
+
+  kumpulin_tugas: {
+    key: 'kumpulin_tugas',
+    title: 'Cara Mengumpulkan Tugas',
+    shortTitle: 'Kumpulkan Tugas',
+    intent: 'tutorial_kumpulin_tugas',
+    intro: 'Tutorial ini menjelaskan cara membaca instruksi, mengunggah file, dan memastikan tugas sudah terkumpul.',
+    note: 'Catatan: judul tugas, format file, dan isi teks pada gambar hanya contoh. Selalu ikuti format file yang diminta guru.',
+    steps: [
+      {
+        title: 'Buka tugas dari course',
+        text: 'Pilih aktivitas tugas dari course kamu. Baca judul tugas dan pastikan kamu membuka tugas yang benar.',
+        image: ENTRY_POINT_IMAGE
+      },
+      {
+        title: 'Baca instruksi tugas',
+        text: 'Baca instruksi tugas, format file yang diminta, batas waktu, dan ketentuan pengumpulan. Setelah siap, klik tombol untuk mengirimkan tugas.',
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'TUGAS INSTRUKSI.png')
+      },
+      {
+        title: 'Cek status pengajuan',
+        text: 'Perhatikan status tugas. Dari sini kamu bisa tahu apakah tugas belum dikumpulkan, sudah terkirim, atau masih bisa diedit.',
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'TUGAS STATUS.png')
+      },
+      {
+        title: 'Isi catatan jika perlu',
+        text: 'Jika guru meminta catatan atau deskripsi tambahan, tuliskan pada kolom pesan/teks yang tersedia.',
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'INPUT TEKS TUGAS.png')
+      },
+      {
+        title: 'Upload file tugas',
+        text: 'Unggah file tugas sesuai format yang diminta, misalnya PDF, PNG, JPG, DOCX, atau format lain sesuai instruksi guru. Setelah itu simpan/kirim.',
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'INPUT FILE TUGAS.png')
+      },
+      {
+        title: 'Pastikan status selesai',
+        text: 'Setelah mengirim, pastikan status tugas menunjukkan bahwa tugas sudah berhasil dikumpulkan.',
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'STATUS SELESAI.png')
+      }
+    ]
+  },
+
+  lihat_aktivitas: {
+    key: 'lihat_aktivitas',
+    title: 'Cara Melihat Aktivitas',
+    shortTitle: 'Lihat Aktivitas',
+    intent: 'tutorial_lihat_aktivitas',
+    intro: 'Tutorial ini menjelaskan cara membuka daftar aktivitas seperti tugas, kuis, forum, dan materi.',
+    note: 'Catatan: nama aktivitas pada gambar hanya contoh. Daftar aktivitas bisa berbeda sesuai course dan kelas kamu.',
+    steps: [
+      {
+        title: 'Perhatikan halaman course',
+        text: 'Tetap di halaman course. Dari sini kamu bisa melihat menu yang tersedia untuk course tersebut.',
+        image: ENTRY_POINT_IMAGE
+      },
+      {
+        title: 'Klik menu Aktivitas',
+        text: 'Klik menu “Aktivitas” untuk melihat daftar aktivitas seperti kuis, tugas, forum, dan materi.',
+        image: detailImage('TUTORIAL LIHAT AKTIVITAS', '1.png')
+      }
+    ]
+  },
+
+  lihat_nilai: {
+    key: 'lihat_nilai',
+    title: 'Cara Melihat Nilai',
+    shortTitle: 'Lihat Nilai',
+    intent: 'tutorial_lihat_nilai',
+    intro: 'Tutorial ini menjelaskan cara membuka menu nilai dan membaca daftar nilai aktivitas.',
+    note: 'Catatan: angka nilai pada gambar hanya contoh. Nilai asli mengikuti data akun dan course kamu.',
+    steps: [
+      {
+        title: 'Perhatikan halaman course',
+        text: 'Tetap di halaman course. Dari sini kamu bisa membuka menu nilai pada course tersebut.',
+        image: ENTRY_POINT_IMAGE
+      },
+      {
+        title: 'Klik menu Nilai',
+        text: 'Klik menu “Nilai” untuk membuka laporan nilai pada course.',
+        image: detailImage('TUTORIAL LIHAT NILAI', '1.png')
+      },
+      {
+        title: 'Lihat daftar nilai',
+        text: 'Di halaman nilai, kamu bisa melihat nilai kuis, tugas, dan rata-rata nilai jika tersedia.',
+        image: detailImage('TUTORIAL LIHAT NILAI', '2.png')
+      }
+    ]
+  },
+
+  logout: {
+    key: 'logout',
+    title: 'Cara Logout dari VClass',
+    shortTitle: 'Logout',
+    intent: 'tutorial_logout',
+    intro: 'Tutorial ini menjelaskan cara keluar dari akun VClass di desktop maupun handphone.',
+    note: 'Catatan: tampilan desktop dan handphone bisa sedikit berbeda, tetapi tombol keluar biasanya ada pada menu akun/profil.',
+    steps: [
+      {
+        title: 'Mode desktop: cari ikon user',
+        text: 'Jika memakai laptop/desktop, cari tombol dengan ikon user atau profil siswa pada bagian atas halaman.',
+        image: detailImage('TUTORIAL LOGOUT', '1.png')
+      },
+      {
+        title: 'Mode handphone: cari tombol burger',
+        text: 'Jika memakai handphone, cari tombol garis tiga/burger di pojok kanan atas.',
+        image: detailImage('TUTORIAL LOGOUT', '1(2).png')
+      },
+      {
+        title: 'Klik ikon user/profil',
+        text: 'Setelah menu terbuka, klik ikon user atau bagian profil siswa.',
+        image: detailImage('TUTORIAL LOGOUT', '2.png')
+      },
+      {
+        title: 'Klik tombol Keluar',
+        text: 'Cek bagian pojok kanan bawah menu. Klik tombol “Keluar” untuk logout dari akun VClass.',
+        image: detailImage('TUTORIAL LOGOUT', '3.png')
+      }
+    ]
+  },
+
+  kuis: {
+    key: 'kuis',
+    title: 'Cara Mengerjakan Kuis',
+    shortTitle: 'Mengerjakan Kuis',
+    intent: 'tutorial_kuis',
+    intro: 'Tutorial ini menjelaskan cara membuka kuis, mengerjakan soal, dan mengirim jawaban kuis.',
+    note: 'Catatan: soal, pilihan jawaban, dan nilai pada gambar hanya contoh. Jawab soal sesuai materi yang kamu pelajari.',
+    steps: [
+      {
+        title: 'Pilih link kuis dari course',
+        text: 'Klik link kuis yang ingin kamu kerjakan dari halaman course.',
+        image: ENTRY_POINT_IMAGE
+      },
+      {
+        title: 'Baca instruksi kuis',
+        text: 'Baca instruksi kuis, jumlah percobaan, waktu pengerjaan, dan aturan penilaian. Setelah siap, klik tombol “Kerjakan kuis”.',
+        image: detailImage('TUTORIAL QUIS', '1.png')
+      },
+      {
+        title: 'Perhatikan navigasi kuis',
+        text: 'Gunakan navigasi kuis untuk melihat kamu sedang mengerjakan nomor berapa dan soal mana yang belum dijawab.',
+        image: detailImage('TUTORIAL QUIS', '2.png')
+      },
+      {
+        title: 'Jawab soal pilihan ganda',
+        text: 'Pilih salah satu jawaban yang menurut kamu benar. Pastikan hanya memilih jawaban yang sesuai instruksi soal.',
+        image: detailImage('TUTORIAL QUIS', '3.png')
+      },
+      {
+        title: 'Klik Halaman selanjutnya',
+        text: 'Klik tombol “Halaman selanjutnya” untuk berpindah ke soal berikutnya.',
+        image: detailImage('TUTORIAL QUIS', '4.png')
+      },
+      {
+        title: 'Kirim semua dan selesai',
+        text: 'Setelah semua soal selesai dijawab, klik tombol “Kirim semua dan selesai” untuk mengumpulkan kuis.',
+        image: detailImage('TUTORIAL QUIS', '5.png')
+      },
+      {
+        title: 'Review hasil pengerjaan',
+        text: 'Lihat dan review ringkasan/statistik pengerjaan kuis kamu jika halaman review tersedia.',
+        image: detailImage('TUTORIAL QUIS', '6.png')
+      },
+      {
+        title: 'Lanjut ke materi berikutnya',
+        text: 'Setelah selesai mereview, klik tombol selanjutnya untuk melanjutkan ke materi atau aktivitas berikutnya.',
+        image: detailImage('TUTORIAL QUIS', '7.png')
+      }
+    ]
+  }
+};
+
+function isLmsStatusQuestion(message = '', intent = '') {
+  const normalizedIntent = String(intent || '').toLowerCase().trim();
+  const text = normalizeText(message);
+
+  if (LMS_INTENTS.includes(normalizedIntent)) return true;
+
+  const asksStatus = /\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja|daftar|list|cek|kerjain|ngerjain|dikerjain|deadline|tenggat|batas waktu|hari ini|terdekat|kerjain|ngerjain|dikerjain)\b/i.test(text);
+  const mentionsActivity = /\b(quiz|kuis|quis|ujian|ulangan|soal|forum|diskusi|tugas|assignment|aktivitas|activity)\b/i.test(text);
+
+  return mentionsActivity && asksStatus;
+}
+
+function inferLmsStatusIntentFromMessage(message = '') {
+  const text = normalizeText(message);
+  const hasStatus = /\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja|daftar|list|cek|kerjain|ngerjain|dikerjain)\b/i.test(text);
+
+  if (/\b(deadline|tenggat|batas waktu|jatuh tempo)\b/i.test(text)) {
+    if (/\b(hari ini|sekarang|today)\b/i.test(text)) return 'cek_deadline_hari_ini';
+    return 'cek_deadline_terdekat';
+  }
+
+  if (hasStatus && /\b(quiz|kuis|quis|ujian|ulangan|soal)\b/i.test(text)) {
+    return 'cek_quiz_belum_dikerjakan';
+  }
+
+  if (hasStatus && /\b(forum|diskusi|topik diskusi|postingan)\b/i.test(text)) {
+    return 'cek_forum_belum_dijawab';
+  }
+
+  if (hasStatus && /\b(tugas|assignment|pengumpulan)\b/i.test(text)) {
+    return 'cek_tugas_belum_selesai';
+  }
+
+  return '';
+}
+
+function buildAiFollowupPromptForTutorial(tutorial = {}) {
+  const title = String(tutorial.title || tutorial.shortTitle || 'panduan VClass')
+    .replace(/^Cara\s+/i, '')
+    .trim();
+
+  const contextName = title || 'panduan VClass';
+  return `Jelaskan cara ${contextName} secara jelas dan singkat.`;
+}
+
+function resolveStaticTutorialKey(intent = '', message = '') {
+  const normalizedIntent = String(intent || '').toLowerCase().trim();
+  const text = normalizeText(message);
+
+  // Jangan trigger tutorial statis untuk pertanyaan status LMS, misalnya:
+  // "quiz apa yang belum saya kerjakan?", "forum apa yang belum saya jawab?",
+  // atau "deadline apa saja hari ini?". Pertanyaan seperti itu harus masuk jalur data LMS.
+  if (isLmsStatusQuestion(text, normalizedIntent)) return '';
+
+  const byIntent = {
+    tutorial_buat_forum: 'buat_forum',
+    tutorial_reply_forum: 'reply_forum',
+    tutorial_kumpulin_tugas: 'kumpulin_tugas',
+    tutorial_lihat_aktivitas: 'lihat_aktivitas',
+    tutorial_lihat_nilai: 'lihat_nilai',
+    tutorial_logout: 'logout',
+    tutorial_kuis: 'kuis',
+    bantuan_kumpul_tugas: 'kumpulin_tugas',
+    bantuan_logout: 'logout',
+    bantuan_lihat_nilai: 'lihat_nilai',
+    bantuan_kuis: 'kuis',
+    bantuan_quiz: 'kuis'
+  };
+
+  if (byIntent[normalizedIntent]) return byIntent[normalizedIntent];
+
+  if (normalizedIntent === 'bantuan_forum') {
+    if (/\b(reply|balas|membalas|jawab|menjawab)\b/i.test(text)) return 'reply_forum';
+    return 'buat_forum';
+  }
+
+  if (normalizedIntent === 'bantuan_tugas') {
+    if (/\b(lihat|melihat|daftar|aktivitas|activity)\b/i.test(text)) return 'lihat_aktivitas';
+    return 'kumpulin_tugas';
+  }
+
+  if (/\b(reply|balas|membalas)\b/i.test(text) && /\b(forum|diskusi)\b/i.test(text)) return 'reply_forum';
+  if (/\b(buat|membuat|tambah|tambahkan|posting|topik)\b/i.test(text) && /\b(forum|diskusi)\b/i.test(text)) return 'buat_forum';
+  if (/\b(kumpul|kumpulin|mengumpulkan|upload|unggah|kirimkan)\b/i.test(text) && /\b(tugas|assignment)\b/i.test(text)) return 'kumpulin_tugas';
+  if (/\b(lihat|melihat|cek|daftar)\b/i.test(text) && /\b(aktivitas|activity|tugas)\b/i.test(text)) return 'lihat_aktivitas';
+  if (/\b(nilai|grade|grades|rapor|laporan)\b/i.test(text)) return 'lihat_nilai';
+  if (/\b(logout|log out|keluar|sign out)\b/i.test(text)) return 'logout';
+  if (/\b(kuis|quiz|soal|ujian)\b/i.test(text)) return 'kuis';
+
+  return '';
+}
+
+function cloneStaticTutorial(tutorial = {}) {
+  return JSON.parse(JSON.stringify(tutorial || {}));
+}
+
+function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', effectiveMessage = '' }) {
+  const tutorial = STATIC_TUTORIALS[tutorialKey];
+  if (!tutorial) return null;
+
+  const safeName = String(studentName || 'teman').trim() || 'teman';
+  const payload = cloneStaticTutorial(tutorial);
+  payload.original_message = effectiveMessage;
+
+  return {
+    message:
+      `Hai **${safeName}**,\n\n` +
+      `Aku sudah siapkan panduan visual **${tutorial.title}**.\n\n` +
+      `Silakan klik tombol di bawah ini untuk membuka langkah-langkahnya dalam bentuk carousel. ` +
+      `Gambarnya bisa diklik supaya tampil lebih besar.`,
+    actions: [
+      {
+        type: 'static_tutorial_carousel',
+        label: `Lihat Tutorial ${tutorial.shortTitle || tutorial.title}`,
+        payload
+      },
+      {
+        type: 'ask_ai',
+        label: 'Belum jelas, jelaskan dengan AI',
+        payload: {
+          original_message: effectiveMessage,
+          message: buildAiFollowupPromptForTutorial(tutorial),
+          source_answer: `Panduan sistem berbasis gambar statis: ${tutorial.title}`,
+          intent: tutorial.intent,
+          responseMode: 'short',
+          forceAI: true,
+          expectedSourceType: 'all'
+        }
+      },
+      { type: 'system_feedback_ok', label: 'Sudah jelas' }
+    ]
+  };
+}
+
+function isCacheableAIRequest({ detectedIntent, forceAI, forceFAQ, forceSystem }) {
+  if (forceFAQ || forceSystem) return false;
+
+  // Kalau user sengaja minta "jelaskan dengan AI", boleh tetap cache
+  // asal bukan pertanyaan elemen/UI spesifik.
+  const cacheableIntents = [
+    'penjelasan_materi',
+    'general_learning_help'
+  ];
+
+  return cacheableIntents.includes(detectedIntent);
+}
+
+function getCacheTtlMs() {
+  const seconds = parseInt(process.env.AI_RESPONSE_CACHE_TTL_SECONDS || '86400', 10);
+  return Math.max(60, seconds) * 1000;
+}
+
+function getExpiresAt() {
+  return new Date(Date.now() + getCacheTtlMs()).toISOString();
+}
+
+function buildContextHash(retrievalResults = []) {
+  const raw = retrievalResults
+    .slice(0, 2)
+    .map((item) => [
+      item.source_type,
+      item.title,
+      item.topic,
+      item.metadata?.document_id,
+      item.metadata?.page_number
+    ].filter(Boolean).join('|'))
+    .join('\n---\n');
+
+  return aiResponseCacheModel.hashText(raw || 'no_context');
 }
 
 const SAFE_SYSTEM_INTENTS = [
@@ -93,9 +754,32 @@ async function safeMatchTemplate(projectId, context = {}, sourceUrl = '') {
   }
 }
 
-async function buildTemplateMap(projectId, currentPageContext = {}, sourceUrl = '') {
-  const current = await safeMatchTemplate(projectId, currentPageContext, sourceUrl);
-  const map = { current };
+async function safeFindTemplateByType(projectId, pageType = '') {
+  if (!pageType) return null;
+  try {
+    if (typeof pageTemplateService.findTemplateByType === 'function') {
+      return await pageTemplateService.findTemplateByType(projectId, pageType);
+    }
+    return null;
+  } catch (error) {
+    console.warn('[chat.service] Gagal ambil template type:', pageType, error.message);
+    return null;
+  }
+}
+
+function getTemplateKeysForIntent(intent = '') {
+  if (intent === 'bantuan_login') return ['login', 'landing', 'dashboard'];
+  if (intent === 'navigasi_kursus' || intent === 'bantuan_dashboard') return ['dashboard'];
+  if (intent === 'akses_materi') return ['course', 'materi', 'summary', 'dashboard'];
+  if (intent === 'bantuan_kuis' || intent === 'bantuan_quiz') return ['quiz', 'course'];
+  if (intent === 'bantuan_tugas' || intent === 'bantuan_kumpul_tugas') return ['tugas', 'tugas_detail', 'tugas_selesai', 'course'];
+  if (intent === 'bantuan_forum') return ['forum', 'forum_detail', 'course'];
+  if (intent === 'tutorial_steps') return ['login', 'dashboard', 'course'];
+  return [];
+}
+
+async function buildTemplateMap(projectId, currentPageContext = {}, sourceUrl = '', intent = '') {
+  const map = { current: null };
 
   const candidates = {
     landing: {
@@ -125,15 +809,52 @@ async function buildTemplateMap(projectId, currentPageContext = {}, sourceUrl = 
     quiz: {
       pageType: 'quiz', type: 'quiz', title: 'Quiz', heading: 'Quiz',
       sourceUrl: 'https://lms.smpn167jakarta.sch.id/mod/quiz/view.php?id=1'
+    },
+    forum: {
+      pageType: 'forum', type: 'forum', title: 'Forum', heading: 'Forum',
+      sourceUrl: 'https://lms.smpn167jakarta.sch.id/mod/forum/view.php?id=1'
+    },
+    forum_detail: {
+      pageType: 'forum_detail', type: 'forum_detail', title: 'Diskusi Forum', heading: 'Diskusi Forum',
+      sourceUrl: 'https://lms.smpn167jakarta.sch.id/mod/forum/discuss.php?d=1'
+    },
+    tugas: {
+      pageType: 'tugas', type: 'tugas', title: 'Tugas', heading: 'Tugas',
+      sourceUrl: 'https://lms.smpn167jakarta.sch.id/mod/assign/view.php?id=1'
+    },
+    tugas_detail: {
+      pageType: 'tugas_detail', type: 'tugas_detail', title: 'Upload Tugas', heading: 'Upload Tugas',
+      sourceUrl: 'https://lms.smpn167jakarta.sch.id/mod/assign/view.php?id=1&action=editsubmission'
+    },
+    tugas_selesai: {
+      pageType: 'tugas_selesai', type: 'tugas_selesai', title: 'Tugas Selesai', heading: 'Tugas Selesai',
+      sourceUrl: 'https://lms.smpn167jakarta.sch.id/mod/assign/view.php?id=1'
     }
   };
 
-  for (const [key, ctx] of Object.entries(candidates)) {
-    if (current && isTemplateProbablyFor(current, [key])) {
-      map[key] = current;
-      continue;
+  const keys = getTemplateKeysForIntent(intent);
+
+  // Untuk request biasa, jangan ambil semua template supaya /send tidak lemot.
+  if (!keys.length) return map;
+
+  for (const key of keys) {
+    map[key] = await safeFindTemplateByType(projectId, key);
+
+    // Fallback match kalau type belum ketemu.
+    if (!map[key] && candidates[key]) {
+      map[key] = await safeMatchTemplate(projectId, candidates[key], candidates[key].sourceUrl);
     }
-    map[key] = await safeMatchTemplate(projectId, ctx, ctx.sourceUrl);
+
+    if (!map.current && map[key]) map.current = map[key];
+  }
+
+  // Kalau current page memang cocok dengan salah satu target, pakai itu sebagai current juga.
+  const current = await safeMatchTemplate(projectId, currentPageContext, sourceUrl);
+  if (current && keys.some((key) => isTemplateProbablyFor(current, [key]))) {
+    map.current = current;
+    keys.forEach((key) => {
+      if (isTemplateProbablyFor(current, [key])) map[key] = current;
+    });
   }
 
   return map;
@@ -141,10 +862,35 @@ async function buildTemplateMap(projectId, currentPageContext = {}, sourceUrl = 
 
 function selectSystemTemplate({ intent, templateMap }) {
   if (!templateMap) return null;
-  if (intent === 'bantuan_login') return templateMap.login || templateMap.landing || templateMap.current;
-  if (intent === 'navigasi_kursus' || intent === 'bantuan_dashboard') return templateMap.dashboard || templateMap.current;
-  if (intent === 'akses_materi') return templateMap.course || templateMap.materi || templateMap.summary || templateMap.current;
-  if (intent === 'penjelasan_materi') return templateMap.summary || templateMap.materi || templateMap.course || templateMap.current;
+
+  if (intent === 'bantuan_login') {
+    return templateMap.login || templateMap.landing || templateMap.current;
+  }
+
+  if (intent === 'navigasi_kursus' || intent === 'bantuan_dashboard') {
+    return templateMap.dashboard || templateMap.current;
+  }
+
+  if (intent === 'akses_materi') {
+    return templateMap.course || templateMap.materi || templateMap.summary || templateMap.current;
+  }
+
+  if (intent === 'bantuan_tugas' || intent === 'bantuan_kumpul_tugas') {
+    return templateMap.course || templateMap.current;
+  }
+
+  if (intent === 'bantuan_kuis' || intent === 'bantuan_quiz') {
+    return templateMap.quiz || templateMap.course || templateMap.current;
+  }
+
+  if (intent === 'bantuan_forum') {
+    return templateMap.course || templateMap.current;
+  }
+
+  if (intent === 'penjelasan_materi') {
+    return templateMap.summary || templateMap.materi || templateMap.course || templateMap.current;
+  }
+
   return templateMap.current;
 }
 
@@ -316,10 +1062,514 @@ function sortActivitiesByTypeAsc(activities = []) {
   });
 }
 
+const QUICK_GUIDE_FAQ_MAP = {
+  bantuan_kumpul_tugas: {
+    categoryIncludes: ['tugas'],
+    query: 'Cara upload tugas gimana?',
+    fallbackMessage:
+      'Untuk mengumpulkan tugas, buka aktivitas Tugas/Assignment, baca instruksi, klik Add submission/Tambah pengumpulan, unggah file sesuai format, lalu klik Save changes/Simpan. Jika ada tombol Submit assignment/Kirim tugas, klik juga tombol tersebut agar benar-benar terkumpul.'
+  },
+
+  bantuan_tugas: {
+    categoryIncludes: ['tugas'],
+    query: 'Cara upload tugas gimana?',
+    fallbackMessage:
+      'Untuk mengumpulkan tugas, buka aktivitas Tugas/Assignment, baca instruksi, klik Add submission/Tambah pengumpulan, unggah file sesuai format, lalu klik Save changes/Simpan.'
+  },
+
+  bantuan_forum: {
+    categoryIncludes: ['forum', 'aktivitas forum'],
+    query: 'Bagaimana cara mengerjakan tugas forum di VClass?',
+    fallbackMessage:
+      'Untuk mengerjakan forum, buka kursus Informatika sesuai kelasmu, cari aktivitas Forum, baca instruksi guru, lalu pilih membuat topik diskusi baru atau membalas postingan dengan tombol Reply/Balas. Tulis jawaban dengan sopan, lalu klik Kirim/Post.'
+  },
+
+  bantuan_quiz: {
+    categoryIncludes: ['quiz', 'quiz/exam'],
+    query: 'Cara mengerjakan soal/quiz gimana?',
+    fallbackMessage:
+      'Untuk mengerjakan quiz, buka course, cari aktivitas Quiz/Ujian, baca instruksi, lalu klik Attempt quiz/Kerjakan. Jawab soal satu per satu, gunakan Next jika ada, lalu klik Submit all and finish/Kumpulkan setelah yakin selesai.'
+  },
+
+  bantuan_kuis: {
+    categoryIncludes: ['quiz', 'quiz/exam'],
+    query: 'Cara mengerjakan soal/quiz gimana?',
+    fallbackMessage:
+      'Untuk mengerjakan quiz, buka course, cari aktivitas Quiz/Ujian, baca instruksi, lalu klik Attempt quiz/Kerjakan. Jawab soal satu per satu, lalu klik Submit all and finish/Kumpulkan setelah selesai.'
+  },
+
+  bantuan_login: {
+    categoryIncludes: ['login'],
+    query: 'Cara login ke Virtual Class gimana?',
+    fallbackMessage:
+      'Untuk login, buka halaman Virtual Class, klik Login, lalu masukkan username/email dan password dari sekolah/guru/admin. Setelah itu klik Masuk/Login.'
+  },
+
+  bantuan_lupa_password: {
+    categoryIncludes: ['login'],
+    query: 'Kalau lupa password gimana?',
+    fallbackMessage:
+      'Jika lupa password, gunakan fitur Lupa Password jika tersedia. Jika tidak tersedia atau email pemulihan tidak aktif, hubungi guru/admin untuk reset password.'
+  },
+
+  bantuan_logout: {
+    categoryIncludes: ['logout', 'keluar akun', 'akun'],
+    query: 'Cara logout atau keluar akun VClass gimana?',
+    fallbackMessage:
+      'Untuk keluar akun VClass, cari menu profil atau nama akun di bagian kanan atas, lalu pilih Log out/Keluar. Setelah itu pastikan halaman kembali ke halaman login atau landing.'
+  }
+};
+
+function normalizeFaqText(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isFaqCategoryAllowed(faq = {}, allowedCategories = []) {
+  if (!allowedCategories.length) return true;
+
+  const category = normalizeFaqText(faq.category || faq.metadata?.category || '');
+  return allowedCategories.some((item) => category.includes(normalizeFaqText(item)));
+}
+
+async function getQuickGuideFaqAnswer(projectId, intent) {
+  const config = QUICK_GUIDE_FAQ_MAP[intent];
+  if (!config) return null;
+
+  try {
+    const results = await retrievalService.retrieve(
+      projectId,
+      config.query,
+      {},
+      5,
+      { sourceType: 'faq' }
+    );
+
+    const matched = results.find((item) => {
+      return isFaqCategoryAllowed(item, config.categoryIncludes);
+    });
+
+    if (matched?.content) {
+      return {
+        message: matched.content,
+        matched
+      };
+    }
+
+    return {
+      message: config.fallbackMessage,
+      matched: null
+    };
+  } catch (error) {
+    console.warn('[chat.service] Gagal mengambil quick guide FAQ:', error.message);
+
+    return {
+      message: config.fallbackMessage,
+      matched: null
+    };
+  }
+}
+
+
+function safeParseArray(value, fallback = []) {
+  if (!value) return fallback;
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'object') return Array.isArray(value) ? value : fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function startsWithGreeting(value = '') {
+  const plain = String(value || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\*\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return plain.startsWith('hai ') || plain.startsWith('halo ');
+}
+
+function addStudentGreeting(message = '', studentName = '') {
+  const safeName = String(studentName || 'teman').trim() || 'teman';
+  const raw = String(message || '').trim();
+  if (!raw) return `Hai **${safeName}**, ada yang bisa aku bantu?`;
+
+  if (raw.includes('"answer_mode"') && raw.includes('tutorial_steps')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.answer_mode === 'tutorial_steps') {
+        const answerText = String(parsed.answer_text || '').trim();
+        parsed.answer_text = startsWithGreeting(answerText)
+          ? answerText
+          : `Hai **${safeName}**,\n\n${answerText || 'Berikut panduan penggunaan dari sistem.'}`;
+        return JSON.stringify(parsed);
+      }
+    } catch (_) {}
+  }
+
+  if (startsWithGreeting(raw)) return raw;
+  return `Hai **${safeName}**,\n\n${raw}`;
+}
+
+function extractTemplateStyles(html = '') {
+  const raw = String(html || '');
+  const styles = [];
+  const linkRegex = /<link\b(?=[^>]*rel=["']?stylesheet["']?)[^>]*>/gi;
+  const styleRegex = /<style\b[^>]*>[\s\S]*?<\/style>/gi;
+  let match;
+  while ((match = linkRegex.exec(raw)) !== null) styles.push(match[0]);
+  while ((match = styleRegex.exec(raw)) !== null) styles.push(match[0]);
+  return styles.join('\n');
+}
+
+function getTemplateElements(template = {}) {
+  return safeParseArray(template?.elements_json, []);
+}
+
+function getTemplateSteps(template = {}) {
+  return safeParseArray(template?.tutorial_steps_json, []);
+}
+
+function normalizeStep(step = {}, index = 0) {
+  return {
+    step_number: step.step_number || step.step || index + 1,
+    title: step.title || `Langkah ${index + 1}`,
+    description: step.description || step.text || '',
+    element_ref: step.element_ref || step.element_key || step.key || step.element || ''
+  };
+}
+
+function findElementByKey(elements = [], key = '') {
+  const target = String(key || '').toLowerCase().trim();
+  if (!target) return null;
+  return (elements || []).find((el) => {
+    return [el.key, el.name, el.title, el.selector]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().trim() === target);
+  }) || null;
+}
+
+function withTemplateMeta(element = {}, template = {}) {
+  if (!element) return null;
+  return {
+    ...element,
+    template_id: template.id,
+    template_name: template.template_name,
+    template_page_type: template.page_type,
+    template_styles: extractTemplateStyles(template.html_preview || '')
+  };
+}
+
+function makeFaqReference(intent = '') {
+  const config = QUICK_GUIDE_FAQ_MAP[intent] || QUICK_GUIDE_FAQ_MAP.bantuan_login;
+  if (!config) return null;
+  return {
+    title: `Referensi FAQ terkait: ${config.query}`,
+    content: config.fallbackMessage
+  };
+}
+
+function resolveGuideTemplate(intent, templateMap = {}, matchedTemplate = null) {
+  if (intent === 'bantuan_login') return templateMap.login || templateMap.landing || matchedTemplate || templateMap.current;
+  if (intent === 'navigasi_kursus' || intent === 'bantuan_dashboard') return templateMap.dashboard || matchedTemplate || templateMap.current;
+  if (intent === 'akses_materi') return templateMap.course || templateMap.materi || templateMap.summary || templateMap.dashboard || matchedTemplate || templateMap.current;
+  if (intent === 'bantuan_kuis' || intent === 'bantuan_quiz') return templateMap.quiz || templateMap.course || matchedTemplate || templateMap.current;
+  if (intent === 'bantuan_tugas' || intent === 'bantuan_kumpul_tugas' || intent === 'bantuan_forum') return templateMap.course || matchedTemplate || templateMap.current;
+  if (intent === 'bantuan_logout') return templateMap.dashboard || templateMap.current || matchedTemplate;
+  return matchedTemplate || templateMap.current;
+}
+
+
+function makeTemplateElement({ key, name, title, type, text, html, template }) {
+  return withTemplateMeta({ key, name, title, type, text, html }, template || {});
+}
+
+function extractFirstMatch(html = '', regexes = []) {
+  const raw = String(html || '');
+  for (const regex of regexes) {
+    const match = raw.match(regex);
+    if (match && match[0]) return match[0];
+  }
+  return '';
+}
+
+function extractLoginButtonElement(landingElement = {}, landingTemplate = {}) {
+  const html = String(landingElement?.html || '');
+  const buttonHtml = extractFirstMatch(html, [
+    /<a\b(?=[^>]*href=["'][^"']*login\/index\.php[^"']*["'])(?=[^>]*>[^<]*(?:Login|Masuk)[^<]*<\/a>)[\s\S]*?<\/a>/i,
+    /<a\b[^>]*>[\s\S]*?(?:Login Siswa|Login|Masuk)[\s\S]*?<\/a>/i,
+    /<button\b[^>]*>[\s\S]*?(?:Login|Masuk)[\s\S]*?<\/button>/i
+  ]) || html;
+
+  return makeTemplateElement({
+    key: 'visual_login_open_button',
+    name: '@tombollogin',
+    title: 'Tombol Login',
+    type: 'Tombol',
+    text: 'Login Siswa / Masuk',
+    html: buttonHtml,
+    template: landingTemplate
+  });
+}
+
+function splitLoginFormVisuals(loginElement = {}, loginTemplate = {}) {
+  const html = String(loginElement?.html || '');
+
+  const usernameBlock = extractFirstMatch(html, [
+    /<div\b[^>]*(?:login-form-username|username)[^>]*>[\s\S]*?<\/div>/i,
+    /<label\b[^>]*for=["']username["'][\s\S]*?<input\b[^>]*id=["']username["'][^>]*>/i,
+    /<input\b[^>]*(?:name|id)=["']username["'][^>]*>/i
+  ]);
+
+  const passwordBlock = extractFirstMatch(html, [
+    /<div\b[^>]*(?:login-form-password|password)[^>]*>[\s\S]*?<\/div>/i,
+    /<label\b[^>]*for=["']password["'][\s\S]*?<input\b[^>]*id=["']password["'][^>]*>/i,
+    /<input\b[^>]*(?:name|id)=["']password["'][^>]*>/i
+  ]);
+
+  const submitBlock = extractFirstMatch(html, [
+    /<div\b[^>]*(?:login-form-submit|submit)[^>]*>[\s\S]*?<\/div>/i,
+    /<button\b[^>]*(?:id=["']loginbtn["']|type=["']submit["'])[^>]*>[\s\S]*?<\/button>/i
+  ]);
+
+  const fieldsHtml = `<form class="login-form alb-login-preview-form">${usernameBlock || ''}${passwordBlock || ''}</form>`;
+  const submitHtml = submitBlock || extractFirstMatch(html, [/<button\b[^>]*>[\s\S]*?(?:Log in|Login|Masuk)[\s\S]*?<\/button>/i]) || html;
+
+  return {
+    fields: makeTemplateElement({
+      key: 'visual_login_fields',
+      name: '@kolomusernamepassword',
+      title: 'Kolom Username dan Password',
+      type: 'Kolom Input',
+      text: 'Kolom username dan password',
+      html: fieldsHtml,
+      template: loginTemplate
+    }),
+    submit: makeTemplateElement({
+      key: 'visual_login_submit',
+      name: '@tombolmasuk',
+      title: 'Tombol Log in / Masuk',
+      type: 'Tombol',
+      text: 'Tombol Log in / Masuk',
+      html: submitHtml,
+      template: loginTemplate
+    })
+  };
+}
+
+function makeGenericStepElement(element = {}, template = {}) {
+  const html = String(element?.html || '');
+  let focusedHtml = html;
+
+  if (/forum|reply|balas|diskusi/i.test([element?.title, element?.text, element?.name].filter(Boolean).join(' '))) {
+    focusedHtml = extractFirstMatch(html, [/<button\b[^>]*>[\s\S]*?(?:Reply|Balas|Post|Kirim)[\s\S]*?<\/button>/i, /<a\b[^>]*>[\s\S]*?(?:Reply|Balas|Add discussion|Diskusi)[\s\S]*?<\/a>/i]) || html;
+  }
+
+  if (/quiz|kuis|attempt|kerjakan/i.test([element?.title, element?.text, element?.name].filter(Boolean).join(' '))) {
+    focusedHtml = extractFirstMatch(html, [/<button\b[^>]*>[\s\S]*?(?:Attempt|Kerjakan|Mulai|Submit)[\s\S]*?<\/button>/i, /<a\b[^>]*>[\s\S]*?(?:Attempt|Kerjakan|Mulai|Quiz|Kuis)[\s\S]*?<\/a>/i]) || html;
+  }
+
+  if (/tugas|assign|submission|upload|kumpul/i.test([element?.title, element?.text, element?.name].filter(Boolean).join(' '))) {
+    focusedHtml = extractFirstMatch(html, [/<button\b[^>]*>[\s\S]*?(?:Add submission|Submit|Save|Upload|Kumpul|Simpan)[\s\S]*?<\/button>/i, /<a\b[^>]*>[\s\S]*?(?:Add submission|Submit|Assignment|Tugas|Upload)[\s\S]*?<\/a>/i]) || html;
+  }
+
+  return withTemplateMeta({ ...element, html: focusedHtml }, template);
+}
+
+function buildLoginVisualGuidePayload({ studentName, templateMap = {} }) {
+  const currentTemplate = templateMap.current || null;
+  const currentIsLogin = currentTemplate && isTemplateProbablyFor(currentTemplate, ['login']);
+  const currentIsLandingOrDashboard = currentTemplate && isTemplateProbablyFor(currentTemplate, ['landing', 'dashboard']);
+
+  // Kalau siswa memang sedang berada di halaman login, visual pertama langsung pakai form login.
+  // Kalau siswa berada di landing/dashboard, visual pertama pakai tombol Login/Masuk di area header/navbar halaman asal.
+  const loginTemplate = currentIsLogin ? currentTemplate : (templateMap.login || null);
+  const openTemplate = currentIsLogin
+    ? null
+    : (currentIsLandingOrDashboard ? currentTemplate : (templateMap.landing || templateMap.dashboard || currentTemplate || null));
+
+  const openElements = getTemplateElements(openTemplate);
+  const loginElements = getTemplateElements(loginTemplate);
+
+  const openLoginArea = openElements.find((el) => {
+    const haystack = [el.title, el.text, el.name, el.selector, el.type].filter(Boolean).join(' ');
+    return /login|log in|masuk|akses|navbar|header|pembelajaran/i.test(haystack);
+  }) || openElements[0];
+
+  const loginForm = loginElements.find((el) => {
+    const haystack = [el.title, el.text, el.name, el.selector, el.type].filter(Boolean).join(' ');
+    return /username|password|login|log in|form|kolom/i.test(haystack);
+  }) || loginElements[0];
+
+  const loginButton = !currentIsLogin && openLoginArea
+    ? extractLoginButtonElement(openLoginArea, openTemplate)
+    : null;
+
+  const splitForm = loginForm
+    ? splitLoginFormVisuals(loginForm, loginTemplate)
+    : { fields: null, submit: null };
+
+  const templateElements = currentIsLogin
+    ? [splitForm.fields, splitForm.submit].filter(Boolean)
+    : [loginButton, splitForm.fields, splitForm.submit].filter(Boolean);
+
+  const steps = currentIsLogin
+    ? [
+        {
+          step_number: 1,
+          title: 'Isi username dan password',
+          description: 'Kamu sudah berada di halaman login. Isi kolom username dan password sesuai akun dari sekolah atau guru.',
+          element_ref: splitForm.fields?.key || splitForm.fields?.name || ''
+        },
+        {
+          step_number: 2,
+          title: 'Tekan tombol Log in',
+          description: 'Setelah username dan password terisi, klik tombol Log in/Masuk dan tunggu sampai dashboard terbuka.',
+          element_ref: splitForm.submit?.key || splitForm.submit?.name || ''
+        }
+      ]
+    : [
+        {
+          step_number: 1,
+          title: 'Buka halaman login',
+          description: 'Klik tombol Login/Masuk pada area navbar atau header halaman VClass untuk menuju form login.',
+          element_ref: loginButton?.key || loginButton?.name || ''
+        },
+        {
+          step_number: 2,
+          title: 'Isi username dan password',
+          description: 'Setelah halaman login terbuka, isi kolom username dan password sesuai akun dari sekolah atau guru.',
+          element_ref: splitForm.fields?.key || splitForm.fields?.name || ''
+        },
+        {
+          step_number: 3,
+          title: 'Tekan tombol Log in',
+          description: 'Klik tombol Log in/Masuk, lalu tunggu sampai dashboard VClass terbuka.',
+          element_ref: splitForm.submit?.key || splitForm.submit?.name || ''
+        }
+      ];
+
+  if (!templateElements.length) return null;
+
+  return {
+    answer_mode: 'tutorial_steps',
+    answer_text: `Hai **${studentName || 'teman'}**,
+
+Berikut panduan login VClass sesuai halaman yang sedang kamu buka.`,
+    steps,
+    template_elements: templateElements,
+    faq_reference: makeFaqReference('bantuan_login')
+  };
+}
+
+function buildTemplateVisualGuidePayload({ studentName, intent, template }) {
+  const elements = getTemplateElements(template).map((el) => makeGenericStepElement(el, template));
+  const rawSteps = getTemplateSteps(template);
+
+  const steps = rawSteps.length
+    ? rawSteps.map(normalizeStep)
+    : elements.slice(0, 3).map((el, idx) => ({
+        step_number: idx + 1,
+        title: el.title || el.name || `Langkah ${idx + 1}`,
+        description: el.text || 'Perhatikan elemen ini pada halaman VClass.',
+        element_ref: el.key || el.name || ''
+      }));
+
+  if (!steps.length && !elements.length) return null;
+
+  return {
+    answer_mode: 'tutorial_steps',
+    answer_text: `Hai **${studentName || 'teman'}**,\n\nBerikut panduan penggunaan dari sistem.`,
+    steps,
+    template_elements: elements,
+    faq_reference: makeFaqReference(intent)
+  };
+}
+
+function buildQuickVisualGuideResponse({ studentName, intent, templateMap, matchedTemplate }) {
+  if (intent === 'bantuan_login') {
+    const payload = buildLoginVisualGuidePayload({ studentName, templateMap });
+    return payload ? JSON.stringify(payload) : null;
+  }
+
+  const template = resolveGuideTemplate(intent, templateMap, matchedTemplate);
+  const payload = buildTemplateVisualGuidePayload({ studentName, intent, template });
+  return payload ? JSON.stringify(payload) : null;
+}
+
+function isQuickVisualGuideIntent(intent = '') {
+  return QUICK_VISUAL_GUIDE_INTENTS.includes(intent);
+}
+
+function isAiFollowupPrompt(message = '', forceAI = false) {
+  if (!forceAI) return false;
+  return /(tolong\s+jelaskan\s+lebih\s+detail\s+dengan\s+ai|jawaban\s+sistem\s+sebelumnya)/i.test(String(message || ''));
+}
+
+// FUNGSI UTAMA
+
 const chatService = {
   async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null }) {
     const session = await chatModel.getSessionById(sessionId);
     let pageContextState = safeParseObject(session.page_context, {});
+
+    const sessionPageContext = safeParseObject(session.page_context, {});
+    const sessionCourseContext = safeParseObject(session.course_context, {});
+    const sessionMeta = sessionPageContext.session_meta || {};
+
+    const classCode = lmsContextService.getClassCodeFromSession
+      ? lmsContextService.getClassCodeFromSession(session)
+      : getClassCodeFromSession(session);
+
+    const studentName =
+      pageContext?.session_meta?.display_name ||
+      sessionMeta.display_name ||
+      session.student_alias;
+
+    // Ekstraksi Course ID dari session/context/source_url.
+    // Ini penting supaya chat tetap bisa membaca Moodle API meskipun class_code lama masih "Umum".
+    const fallbackCourseId =
+      sessionMeta.course_id ||
+      sessionCourseContext.course_id ||
+      pageContext?.session_meta?.course_id ||
+      pageContext?.course_id ||
+      getCourseIdFromUrl(session.source_url) ||
+      getCourseIdFromUrl(sessionPageContext.sourceUrl) ||
+      getCourseIdFromUrl(pageContext?.sourceUrl) ||
+      null;
+
+    const moodleUserId =
+      sessionMeta.moodle_user_id ||
+      pageContext?.session_meta?.moodle_user_id ||
+      null;
+
+    const studentEmail =
+      sessionMeta.email ||
+      pageContext?.session_meta?.email ||
+      null;
+
+    const enrolledCourses =
+      sessionMeta.enrolled_courses ||
+      pageContext?.session_meta?.enrolled_courses ||
+      sessionCourseContext.enrolled_courses ||
+      [];
+
+    const pageActivities =
+      sessionMeta.page_activities ||
+      pageContext?.session_meta?.page_activities ||
+      pageContext?.page_activities ||
+      sessionCourseContext.page_activities ||
+      [];
+
+    let lmsContext = null;
+
     let safetyState = pageContextState.safety_state || { warnings: 0, locked: false, burnout_count: 0 };
     if (typeof safetyState.burnout_count !== 'number') safetyState.burnout_count = 0;
     if (typeof safetyState.warnings !== 'number') safetyState.warnings = 0;
@@ -335,283 +1585,389 @@ const chatService = {
     }
 
     const effectiveMessage = forceAI ? cleanFeedbackPrompt(message) : message;
+    let detectedIntent = intent || await intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI });
 
-    // Gunakan intent bawaan tombol jika tersedia, jika tidak jalankan deteksi otomatis
-    const detectedIntent = intent || await intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI });
+    // Guard tambahan: jangan biarkan pertanyaan status LMS seperti
+    // "Quiz apa yang belum saya kerjakan?" salah masuk ke tutorial "Cara mengerjakan kuis".
+    const lmsStatusIntent = inferLmsStatusIntentFromMessage(effectiveMessage);
+    if (!forceAI && lmsStatusIntent) {
+      detectedIntent = lmsStatusIntent;
+    }
 
-// =======================================================
-    // FITUR BARU: LOGIKA BYPASS FAQ UNTUK PANDUAN CEPAT
-    // =======================================================
-    if (forceFAQ) {
-      // 1. HARD BYPASS: HUBUNGI GURU (Tanpa ke FAQ)
-      if (detectedIntent === 'hubungi_guru') {
-        return {
-          intent: detectedIntent,
-          response_source: 'system',
-          ai_usage: aiRateLimitService.getStatus(sessionId),
-          is_locked: safetyState.locked,
-          warnings: safetyState.warnings,
-          botMessage: {
-            message: 'Silakan hubungi **Bapak Ilyas** (Guru/Admin VClass) dengan menekan tombol di bawah ini untuk menceritakan kendala yang kamu alami.',
-            actions: [{ type: 'wa_teacher', label: 'Hubungi Pak Ilyas via WA' }]
-          }
-        };
-      }
-
-      // 2. HARD BYPASS: CEK TUGAS & DEADLINE (Ambil Semua dari tabel Activity tanpa filter skor)
-      if (detectedIntent === 'tanya_deadline') {
-        let activities = [];
-
-        try {
-          activities = await activityModel.findByProjectId(projectId);
-        } catch (err) {
-          console.error('Gagal meload tabel aktivitas:', err);
-        }
-
-        const classDisplayName = getClassDisplayNameFromSession(session);
-
-        if (activities && activities.length > 0) {
-          const sortedActivities = sortActivitiesByTypeAsc(activities);
-
-          let tableHtml = `
-            <details class="alb-task-accordion group border border-hairline rounded-2xl mt-4 mb-3 bg-white overflow-hidden shadow-sm" open>
-              <summary class="cursor-pointer select-none list-none bg-surface-strong hover:bg-hairline-strong px-4 py-3 border-b border-hairline flex items-center justify-between gap-3">
-                <span class="font-bold text-[14px] text-ink">
-                  List tugas - kelas ${escapeHtml(classDisplayName)}
-                </span>
-                <i class="fa-solid fa-chevron-down text-[12px] text-muted-soft group-open:rotate-180 transition-transform duration-300"></i>
-              </summary>
-
-              <div class="overflow-x-auto">
-                <table class="w-full text-left text-[13px] m-0">
-                  <thead class="bg-surface-card border-b border-hairline">
-                    <tr>
-                      <th class="p-3 font-semibold text-ink whitespace-nowrap">Nama Tugas</th>
-                      <th class="p-3 font-semibold text-ink whitespace-nowrap">Jenis</th>
-                      <th class="p-3 font-semibold text-ink whitespace-nowrap text-center">Deadline</th>
-                      <th class="p-3 font-semibold text-ink whitespace-nowrap text-center">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-hairline bg-white">
-          `;
-
-          for (const act of sortedActivities.slice(0, 10)) {
-            const title = escapeHtml(act.title || 'Tugas');
-            const type = escapeHtml(act.activity_type || '-');
-
-            let deadlineText = act.deadline
-              ? new Date(act.deadline).toLocaleString('id-ID')
-              : '';
-
-            if (!deadlineText) {
-              deadlineText = `
-                <button
-                  type="button"
-                  class="btn-wa-specific-task w-full bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors shadow-sm whitespace-nowrap"
-                  data-task="${title}">
-                  <i class="fa-brands fa-whatsapp mr-1"></i> Tanya Guru
-                </button>
-              `;
-            } else {
-              deadlineText = `<span class="text-semantic-error font-medium whitespace-nowrap">${escapeHtml(deadlineText)}</span>`;
-            }
-
-            const actionButton = await buildActivityActionButton({
-              projectId,
-              session,
-              activity: act
-            });
-
-            tableHtml += `
-              <tr class="hover:bg-slate-50">
-                <td class="p-3 font-medium text-primary align-top leading-snug">${title}</td>
-                <td class="p-3 align-top">
-                  <span class="bg-slate-100 text-slate-600 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider whitespace-nowrap border border-slate-200">
-                    ${type}
-                  </span>
-                </td>
-                <td class="p-3 align-top text-center align-middle">${deadlineText}</td>
-                <td class="p-3 align-top text-center align-middle">${actionButton}</td>
-              </tr>
-            `;
-          }
-
-          tableHtml += `
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          `;
-
-          return {
-            intent: detectedIntent,
-            response_source: 'system',
-            ai_usage: aiRateLimitService.getStatus(sessionId),
-            is_locked: safetyState.locked,
-            warnings: safetyState.warnings,
-            botMessage: {
-              message: `Berikut adalah rincian aktivitas pembelajaran kelas ${escapeHtml(classDisplayName)} yang terdaftar di sistem:\n${tableHtml}`,
-              actions: []
-            }
-          };
-        }
-
-        return {
-          intent: detectedIntent,
-          response_source: 'system',
-          ai_usage: aiRateLimitService.getStatus(sessionId),
-          botMessage: {
-            message: `Saat ini belum ada informasi deadline atau tugas spesifik untuk kelas ${escapeHtml(classDisplayName)} yang tercatat di tabel aktivitas.\n\n[ACCORDION=Mau menanyakan jadwal tugas?]Silakan klik tombol WA di bawah ini untuk bertanya langsung ke Pak Ilyas terkait jadwal aktivitas.[/ACCORDION]`,
-            actions: [{ type: 'wa_teacher', label: 'Hubungi Pak Ilyas via WA' }]
-          }
-        };
-      }
-
-      // 3. NORMAL FAQ FLOW (Lupa Password, Kumpul Tugas, dll)
-      const faqResults = await retrievalService.retrieve(projectId, effectiveMessage, pageContext, 1, { sourceType: 'faq' });
-
-      if (faqResults.length > 0 && faqResults[0].score >= 5) {
-        let faqMessage = faqResults[0].content;
-
-        // Label Diperpendek agar rapi di HP
-        let actions = [{ type: 'ask_ai', label: '✨ Tanya AI', payload: { forceAI: true, forceFAQ: false, intent: detectedIntent } }];
-
-        if (detectedIntent === 'bantuan_lupa_password') {
-          faqMessage += '\n\n[ACCORDION=Mau menghubungi guru?]Jika langkah di atas tidak berhasil atau emailmu tidak aktif, silakan klik tombol WA di bawah ini untuk meminta reset password ke Pak Ilyas.[/ACCORDION]';
-          actions.push({ type: 'wa_teacher', label: 'Hubungi Pak Ilyas via WA' });
-        }
-
-        return {
-          intent: detectedIntent,
-          response_source: 'system',
-          ai_usage: aiRateLimitService.getStatus(sessionId),
-          is_locked: safetyState.locked,
-          warnings: safetyState.warnings,
-          botMessage: { message: faqMessage, actions: actions }
-        };
-      } else {
-        return {
-          intent: detectedIntent,
-          response_source: 'system',
-          ai_usage: aiRateLimitService.getStatus(sessionId),
-          is_locked: safetyState.locked,
-          warnings: safetyState.warnings,
-          botMessage: {
-            message: 'Panduan tertulis belum tersedia di data FAQ.',
-            actions: [
-              { type: 'ask_ai', label: '✨ Tanya AI', payload: { forceAI: true, forceFAQ: false, intent: detectedIntent } },
-              { type: 'wa_teacher', label: 'Hubungi Pak Ilyas via WA' }
-            ]
-          }
-        };
+    if (LMS_INTENTS.includes(detectedIntent)) {
+      try {
+        lmsContext = await lmsContextService.buildChatLmsContext({
+          projectId, sessionId, classCode, studentName, moodleUserId, studentEmail,
+          courseId: fallbackCourseId, enrolledCourses, pageActivities, intent: detectedIntent
+        });
+      } catch (e) {
+        console.error('[Chat Service] Error memuat LMS Context:', e.message);
       }
     }
-    // =======================================================
 
-    const pageEvaluation = await ruleService.evaluatePageRule(projectId, pageType, detectedIntent);
-    if (pageEvaluation.isBlocked) {
+    // ==========================================
+    // HARD BLOCK DETEKSI DATA SENSITIF & AKUN
+    // ==========================================
+    const pwdRegex = /(password|sandi|kata sandi|pw)\b.*(saya|aku|gw|gue|ku|kami|kita)/i;
+    if (pwdRegex.test(effectiveMessage)) {
+      const studentEmail = sessionMeta.email || pageContext?.session_meta?.email;
+      let maskedEmail = studentEmail || 'tidak tersedia';
+      if (studentEmail && studentEmail.includes('@')) {
+        const [name, domain] = studentEmail.split('@');
+        maskedEmail = name.substring(0, Math.max(1, Math.floor(name.length/2))) + '***@' + domain;
+      }
       return {
-        intent: detectedIntent,
-        response_source: 'system',
-        botMessage: { message: pageEvaluation.message, actions: [] }
+        intent: 'tanya_password', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: {
+          message: `Demi keamanan privasi, sistem AI **tidak memiliki akses dan tidak diperbolehkan melihat password** kamu.\n\nBerdasarkan sesi VClass ini:\n- Username: ${sessionMeta.username || pageContext?.session_meta?.username || 'tidak tersedia'}\n- Email: ${maskedEmail}\n\nJika kamu lupa password, silakan minta *reset password* ke instruktur.`,
+          actions: [{ type: 'wa_teacher', label: 'Hubungi Guru via WA', url: 'https://api.whatsapp.com/send/?phone=628989807094&text=Halo%20Instruktur%2C%20saya%20lupa%20password.' }]
+        }
       };
     }
 
-    const templateMap = await buildTemplateMap(projectId, pageContext, session.source_url);
-    const matchedTemplate = selectSystemTemplate({ intent: detectedIntent, templateMap });
+    // ==========================================
+    // STATIC IMAGE TUTORIALS: bypass page_template/page rule.
+    // Panduan ini murni memakai screenshot di FE/public/DETAIL.
+    // Kalau user klik "Belum jelas, jelaskan dengan AI", forceAI=true sehingga jalur AI tetap berjalan.
+    // ==========================================
+    const staticTutorialKey = resolveStaticTutorialKey(detectedIntent, effectiveMessage);
+    if (staticTutorialKey && !forceAI) {
+      const staticGuide = buildStaticTutorialChatResponse({
+        studentName,
+        tutorialKey: staticTutorialKey,
+        effectiveMessage
+      });
 
-    if (!forceAI && matchedTemplate && templateMap.current) {
-      // Jika ID template yang dituju berbeda dengan ID template halaman saat ini
-      if (matchedTemplate.id !== templateMap.current.id) {
-        const currentName = templateMap.current.template_name || 'Halaman Saat Ini';
-        const targetName = matchedTemplate.template_name || matchedTemplate.page_type || 'Halaman Tujuan';
+      if (staticGuide) {
+        await chatModel.createMessage({
+          session_id: sessionId,
+          role: 'user',
+          message: effectiveMessage,
+          intent: detectedIntent
+        });
+
+        await chatModel.createMessage({
+          session_id: sessionId,
+          role: 'assistant',
+          message: staticGuide.message,
+          intent: detectedIntent,
+          context_used: {
+            response_source: 'system',
+            actions: staticGuide.actions,
+            used_model: 'static_image_tutorial',
+            static_tutorial_key: staticTutorialKey
+          }
+        });
 
         return {
           intent: detectedIntent,
           response_source: 'system',
-          botMessage: {
-            message: `Sepertinya pertanyaanmu berkaitan dengan langkah-langkah di **${targetName}**, tetapi saat ini sistem mendeteksi kamu sedang berada di **${currentName}**.\n\nApakah kamu ingin saya memindahkan fokus konteks ke **${targetName}** agar saya bisa memberikan panduan visualnya?`,
-            actions: [
-              {
-                type: 'switch_context_and_ask',
-                label: `Ya, pindah ke ${targetName}`,
-                template: matchedTemplate,
-                pending_message: effectiveMessage
-              }
-            ]
-          },
-          ai_usage: aiRateLimitService.getStatus(sessionId)
+          ai_usage: aiRateLimitService.getStatus(sessionId),
+          is_locked: safetyState.locked,
+          warnings: safetyState.warnings,
+          botMessage: { message: staticGuide.message, actions: staticGuide.actions }
         };
       }
     }
 
-    // Moderasi tetap ada, tapi false positive seperti "media sosial" tidak boleh menambah warning/lockdown.
+    // ==========================================
+    // EVALUASI RULES, MODERASI, DAN RETRIEVAL
+    // ==========================================
+    const pageEvaluation = await ruleService.evaluatePageRule(projectId, pageType, detectedIntent);
+    if (pageEvaluation.isBlocked) return { intent: detectedIntent, response_source: 'system', botMessage: { message: pageEvaluation.message, actions: [] } };
+
+    let templateMap = { current: null };
+    let matchedTemplate = null;
+
+    if (isQuickVisualGuideIntent(detectedIntent)) {
+      templateMap = await buildTemplateMap(projectId, pageContext, session.source_url, detectedIntent);
+      matchedTemplate = selectSystemTemplate({ intent: detectedIntent, templateMap });
+    }
+
     const moderationResultRaw = moderationService.checkMessage(effectiveMessage);
-    const isSafeSystemIntent = SAFE_SYSTEM_INTENTS.includes(detectedIntent);
-    const shouldHardBlock = moderationResultRaw?.isFlagged && HARD_BLOCK_MODERATION_TYPES.includes(moderationResultRaw.type);
-    const shouldSoftBlock = moderationResultRaw?.isFlagged &&
-      moderationResultRaw.type === 'profanity' &&
-      !isSafeSystemIntent &&
-      hasObviousProfanity(effectiveMessage);
+    const moderationResult = moderationResultRaw?.isFlagged ? moderationResultRaw : { isFlagged: false };
 
-    const moderationResult = (shouldHardBlock || shouldSoftBlock || moderationResultRaw?.type === 'mental_health')
-      ? moderationResultRaw
-      : { isFlagged: false };
-
-    if (shouldHardBlock || shouldSoftBlock) {
+    if (!isAiFollowupPrompt(effectiveMessage, forceAI) && moderationResult.isFlagged && ['hate_speech', 'profanity'].includes(moderationResult.type)) {
       safetyState.warnings += 1;
       if (safetyState.warnings >= 3) safetyState.locked = true;
       await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } });
-      const sysRes = systemResponseService.buildSystemResponse({ moderationResult });
+      return { intent: detectedIntent, response_source: 'system', botMessage: { message: 'Bahasa tidak pantas terdeteksi.', actions: [] }, is_locked: safetyState.locked, warnings: safetyState.warnings, ai_usage: aiRateLimitService.getStatus(sessionId) };
+    }
+
+    await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
+    let aiUsage = aiRateLimitService.getStatus(sessionId);
+
+    if (isQuickVisualGuideIntent(detectedIntent)) {
+      const visualGuideText = buildQuickVisualGuideResponse({
+        studentName,
+        intent: detectedIntent,
+        templateMap,
+        matchedTemplate
+      });
+
+      if (visualGuideText) {
+        const visualResponseSource = forceAI ? 'ai' : 'system';
+        const visualUsedModel = forceAI ? 'system_visual_template_ai_style' : 'system_visual_template';
+        if (forceAI) aiUsage = aiRateLimitService.consume(sessionId);
+        let finalVisualGuideText = visualGuideText;
+        if (forceAI) {
+          try {
+            const parsedVisual = JSON.parse(visualGuideText);
+            parsedVisual.answer_text = String(parsedVisual.answer_text || '').replace('Berikut panduan penggunaan dari sistem.', 'Aku jelaskan lagi dengan lebih pelan. Ikuti langkah-langkah visual berikut ya.');
+            finalVisualGuideText = JSON.stringify(parsedVisual);
+          } catch (_) {}
+        }
+
+        const actions = [
+          {
+            type: 'ask_ai',
+            label: 'Belum jelas, jelaskan dengan AI',
+            payload: {
+              original_message: effectiveMessage,
+              message: effectiveMessage,
+              source_answer: 'Panduan sistem berbasis visual template.',
+              intent: detectedIntent,
+              responseMode: 'short',
+              forceAI: true,
+              expectedSourceType: 'all'
+            }
+          },
+          { type: 'system_feedback_ok', label: 'Sudah jelas' }
+        ];
+
+        const finalActions = forceAI ? actions.filter((act) => act.type !== 'ask_ai') : actions;
+
+        await chatModel.createMessage({
+          session_id: sessionId,
+          role: 'assistant',
+          message: finalVisualGuideText,
+          intent: detectedIntent,
+          context_used: { response_source: visualResponseSource, actions: finalActions, used_model: visualUsedModel }
+        });
+
+        return {
+          intent: detectedIntent,
+          response_source: visualResponseSource,
+          ai_usage: aiUsage,
+          is_locked: safetyState.locked,
+          warnings: safetyState.warnings,
+          botMessage: { message: finalVisualGuideText, actions: finalActions }
+        };
+      }
+    }
+
+    let retrievalResults = [];
+    let contextString = '';
+    const skipRetrievalIntents = ['bantuan_burnout', 'out_of_context', 'greeting', 'hubungi_guru'];
+    const shouldSkipRetrieval =
+      skipRetrievalIntents.includes(detectedIntent) ||
+      LMS_INTENTS.includes(detectedIntent) ||
+      isQuickVisualGuideIntent(detectedIntent);
+
+    const materialQuestion = isLearningMaterialQuestion(effectiveMessage, detectedIntent) || looksLikeMultipleChoiceQuestion(effectiveMessage);
+
+    if (!shouldSkipRetrieval) {
+      const retrievalQuery = canonicalizeRetrievalQuery(effectiveMessage);
+      const sourceTypeForRetrieval = materialQuestion ? 'document_chunk' : (expectedSourceType || 'all');
+      retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 8, { sourceType: sourceTypeForRetrieval });
+      contextString = contextBuilderService.build(retrievalResults);
+      if (materialQuestion && retrievalResults.length > 0) {
+        contextString = buildCoachingContext(contextString);
+      }
+    }
+
+    // Permintaan khusus: “buka materi”. Tampilkan pilihan materi Moodle dari chunk yang sudah tersinkron.
+    if (isOpenMaterialRequest(effectiveMessage) && !forceAI) {
+      const materials = await retrievalService.listMoodleMaterials(projectId, {
+        classCode,
+        courseId: fallbackCourseId,
+        limit: 24
+      }).catch((error) => {
+        console.warn('[chat.service] Gagal mengambil daftar materi Moodle:', error.message);
+        return [];
+      });
+
+      const messageText = materials.length > 0
+        ? 'Aku menemukan beberapa materi Moodle yang sudah tersinkron. Pilih pertemuan/materi yang ingin kamu buka.'
+        : 'Belum ada materi Moodle yang bisa ditampilkan. Pastikan admin sudah menekan Sinkron Moodle di menu Knowledge.';
+
+      const actions = materials.length > 0
+        ? [{ type: 'open_moodle_material_picker', label: 'Pilih materi', materials }]
+        : [];
+
+      await chatModel.createMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        message: addStudentGreeting(messageText, studentName),
+        intent: detectedIntent,
+        context_used: { response_source: 'system', actions, used_model: 'system_moodle_material_picker' }
+      });
+
       return {
         intent: detectedIntent,
         response_source: 'system',
-        botMessage: { message: sysRes.text, actions: [] },
+        ai_usage: aiUsage,
         is_locked: safetyState.locked,
         warnings: safetyState.warnings,
-        ai_usage: aiRateLimitService.getStatus(sessionId)
+        botMessage: { message: addStudentGreeting(messageText, studentName), actions }
       };
     }
 
-    if (detectedIntent === 'bantuan_burnout') {
-      safetyState.burnout_count += 1;
-      await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } });
+    // Guard soal/quiz copas: jangan jawab opsi, tetap arahkan ke materi.
+    if (looksLikeMultipleChoiceQuestion(effectiveMessage)) {
+      const actions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
+      const guardedText = buildQuizCopyPasteResponse({ studentName, retrievalResults });
+
+      await chatModel.createMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        message: guardedText,
+        intent: detectedIntent,
+        context_used: { response_source: 'system_quiz_guard', actions, used_model: 'system_quiz_guard' }
+      });
+
+      return {
+        intent: detectedIntent,
+        response_source: 'system',
+        ai_usage: aiUsage,
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        botMessage: { message: guardedText, actions }
+      };
     }
 
-    await chatModel.createMessage({
-      session_id: sessionId,
-      role: 'user',
-      message: forceAI ? `Belum, jelaskan dengan AI: ${effectiveMessage}` : message,
-      intent: detectedIntent
+    // Cache AI untuk pertanyaan materi: kalau pernah dijawab AI, sistem ambil alih.
+    const cacheEligible = materialQuestion && retrievalResults.length > 0 && !LMS_INTENTS.includes(detectedIntent);
+    if (cacheEligible) {
+      const cachedAnswer = await findCachedMaterialAnswer({
+        projectId,
+        message: effectiveMessage,
+        retrievalResults,
+        intent: detectedIntent
+      });
+
+      if (cachedAnswer?.answer) {
+        const actions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
+        const cachedText = addStudentGreeting(String(cachedAnswer.answer || ''), studentName);
+
+        await chatModel.createMessage({
+          session_id: sessionId,
+          role: 'assistant',
+          message: cachedText,
+          intent: detectedIntent,
+          context_used: { response_source: 'system_ai_cache', actions, used_model: 'ai_response_cache', cache_id: cachedAnswer.id }
+        });
+
+        return {
+          intent: detectedIntent,
+          response_source: 'system',
+          ai_usage: aiUsage,
+          is_locked: safetyState.locked,
+          warnings: safetyState.warnings,
+          botMessage: { message: cachedText, actions }
+        };
+      }
+    }
+
+    // ========================================================
+    // BUILD SYSTEM RESPONSE DAN BYPASS AI (LMS DETERMINISTIC)
+    // ========================================================
+    const sysRes = systemResponseService.buildSystemResponse({
+      message: effectiveMessage, intent: detectedIntent, moderationResult, retrievalResults,
+      pageContext, elementContext, aiUsage, matchedTemplate, templateMap,
+      burnoutCount: safetyState.burnout_count, lmsContext: lmsContext
     });
 
-    let aiUsage = aiRateLimitService.getStatus(sessionId);
-    let retrievalResults = [];
-    let contextString = '';
+    // Mode Jawaban Sistem untuk pertanyaan materi:
+    // Jangan mengarang jawaban materi. Jika belum ada cache AI, arahkan siswa memilih AI Singkat/Detail.
+    if (responseMode === 'system' && !forceAI && materialQuestion && !LMS_INTENTS.includes(detectedIntent)) {
+      const sourceActions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
+      const systemText = buildMaterialSystemPrompt({ hasRetrieval: retrievalResults.length > 0 });
+      const actions = [
+        ...sourceActions,
+        {
+          type: 'ask_ai',
+          label: 'Jelaskan dengan AI Singkat',
+          payload: {
+            original_message: effectiveMessage,
+            message: effectiveMessage,
+            intent: detectedIntent,
+            responseMode: 'short',
+            forceAI: true,
+            expectedSourceType: 'document_chunk'
+          }
+        },
+        {
+          type: 'ask_ai',
+          label: 'Jelaskan dengan AI Detail',
+          payload: {
+            original_message: effectiveMessage,
+            message: effectiveMessage,
+            intent: detectedIntent,
+            responseMode: 'detail',
+            forceAI: true,
+            expectedSourceType: 'document_chunk'
+          }
+        }
+      ];
 
-    const skipRetrievalIntents = ['bantuan_burnout', 'out_of_context', 'greeting', 'hubungi_guru'];
-    if (!skipRetrievalIntents.includes(detectedIntent)) {
-      let finalSourceType = expectedSourceType || pageContext?.expectedSourceType || 'all';
+      await chatModel.createMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        message: addStudentGreeting(systemText, studentName),
+        intent: detectedIntent,
+        context_used: { response_source: 'system', actions, used_model: 'system_material_mode_router' }
+      });
 
-      // Pertanyaan materi harus fokus ke dokumen materi,
-      // supaya tidak ketarik FAQ/activity/tugas.
-      if (detectedIntent === 'penjelasan_materi' || detectedIntent === 'general_learning_help') {
-        finalSourceType = 'document_chunk';
+      return {
+        intent: detectedIntent,
+        response_source: 'system',
+        ai_usage: aiUsage,
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        botMessage: { message: addStudentGreeting(systemText, studentName), actions }
+      };
+    }
+
+
+    const lmsIntents = LMS_INTENTS;
+
+    // JIKA INI PERTANYAAN TUGAS/DEADLINE (LMS) ATAU SYSTEM MODE STRICT -> LANGSUNG RETURN! BYPASS GEMINI!
+    if (lmsIntents.includes(detectedIntent) || (responseMode === 'system' && sysRes.strict)) {
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message: addStudentGreeting(sysRes.text, studentName), intent: detectedIntent,
+        context_used: { response_source: 'system', actions: sysRes.actions || [], used_model: 'system_deterministic' }
+      });
+      return {
+        intent: detectedIntent, response_source: 'system', ai_usage: aiUsage,
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: addStudentGreeting(sysRes.text, studentName), actions: sysRes.actions || [] }
+      };
+    }
+
+    // ==========================================
+    // PROSES KE GEMINI (JIKA BUKAN LMS INTENT)
+    // ==========================================
+    if (forceAI && (aiUsage.cooldown_active || aiUsage.limit_reached || aiUsage.canUseAI === false)) {
+      if (!aiUsage.cooldown_active) {
+        aiUsage = aiRateLimitService.startCooldown(sessionId);
       }
-
-      // Pertanyaan teknis sistem tetap boleh FAQ.
-      if (forceFAQ) {
-        finalSourceType = 'faq';
-      }
-
-      retrievalResults = await retrievalService.retrieve(
-        projectId,
-        effectiveMessage,
-        pageContext,
-        3,
-        { sourceType: finalSourceType }
-      );
-      contextString = contextBuilderService.build(retrievalResults);
+      const waitSeconds = Number(aiUsage.cooldown_remaining_seconds || 180);
+      return {
+        intent: detectedIntent,
+        response_source: 'system',
+        ai_usage: {
+          ...aiUsage,
+          cooldown_active: true,
+          cooldown_remaining_seconds: waitSeconds,
+          limit_reached: true,
+          canUseAI: false
+        },
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        botMessage: { message: `Kuota AI mencapai batas. Tunggu ${waitSeconds} detik.`, actions: [] }
+      };
     }
 
     let botMessageText = '';
@@ -621,176 +1977,60 @@ const chatService = {
     let quotaFallback = false;
     let usedModel = null;
 
-    const sysRes = systemResponseService.buildSystemResponse({
-      message: effectiveMessage,
-      intent: detectedIntent,
-      moderationResult,
-      retrievalResults,
-      pageContext,
-      elementContext,
-      aiUsage,
-      matchedTemplate,
-      templateMap,
-      burnoutCount: safetyState.burnout_count
-    });
+    try {
+      const prompt = promptService.buildPrompt(effectiveMessage, contextString, pageContext, detectedIntent, elementContext, '', responseMode, lmsContext);
+      const geminiResult = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: detectedIntent, responseMode });
 
-    const hardStrictIntents = ['minta_jawaban_langsung', 'quiz_answer_request', 'out_of_context'];
-    const isHardStrict =
-      hardStrictIntents.includes(detectedIntent) ||
-      (moderationResult?.isFlagged && ['hate_speech', 'profanity'].includes(moderationResult.type));
+      if (geminiResult.ok) {
+        usedModel = geminiResult.model;
+        aiUsage = aiRateLimitService.consume(sessionId);
+        botMessageText = geminiResult.text;
+        responseSource = 'ai';
+        actions = [
+          ...(sysRes.actions || []),
+          ...buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage))
+        ];
 
-    const canForceAI = forceAI && aiUsage.canUseAI && !isHardStrict;
-    const shouldUseAI = canForceAI || (aiUsage.canUseAI && !sysRes.strict);
-
-    if (!shouldUseAI && sysRes.strict) {
-      botMessageText = sysRes.text;
-      actions = sysRes.actions || [];
-      responseSource = 'system';
-    } else {
-      const actionRule = await ruleService.findActionRule(projectId, detectedIntent, effectiveMessage, pageType);
-
-      if (!forceAI && !sysRes.strict && matchedTemplate?.tutorial_steps_json) {
-        const tutorialSteps = Array.isArray(matchedTemplate.tutorial_steps_json)
-          ? matchedTemplate.tutorial_steps_json
-          : (() => { try { return JSON.parse(matchedTemplate.tutorial_steps_json); } catch (_) { return []; } })();
-        const relevantTutorial = tutorialSteps.filter(step => step.flow_key === detectedIntent || step.intent === detectedIntent);
-
-        if (relevantTutorial.length > 0) {
-          botMessageText = 'Mari ikuti panduan berikut ini:';
-          actions = [{ type: 'tutorial_flow', label: 'Mulai Tutorial', tutorial_steps: relevantTutorial }];
-          responseSource = 'system';
-        }
-      }
-
-      if (!botMessageText && !forceAI && actionRule && !sysRes.strict) {
-        botMessageText = actionRule.response_message;
-        actions = [{ type: actionRule.action_type, label: actionRule.action_label, url: actionRule.target_url, selector: actionRule.target_selector }];
-        responseSource = 'system';
-      }
-
-      if (!botMessageText && shouldUseAI) {
-        try {
-          const promptPrefix = forceAI
-          ? `User menekan tombol "Belum, jelaskan dengan AI" karena jawaban sistem sebelumnya belum menyelesaikan masalah.\nJangan ulangi jawaban sistem yang sama.\nJelaskan lebih detail, pelan, dan praktis sesuai konteks halaman VClass.\nGunakan konteks template/elemen halaman bila tersedia, tapi jangan membuat tombol palsu.\nJangan memberikan jawaban kuis langsung.\n\nPertanyaan asli user:\n${effectiveMessage}\n\n`
-          : '';
-
-          let templateContextString = '';
-          if (matchedTemplate && (matchedTemplate.tutorial_steps_json || matchedTemplate.elements_json)) {
-            templateContextString = JSON.stringify({
-              tutorial_steps: typeof matchedTemplate.tutorial_steps_json === 'string' ? safeParseObject(matchedTemplate.tutorial_steps_json, []) : (matchedTemplate.tutorial_steps_json || []),
-              elements: typeof matchedTemplate.elements_json === 'string' ? safeParseObject(matchedTemplate.elements_json, []) : (matchedTemplate.elements_json || [])
-            });
-          }
-
-          // Injeksi parameter `templateContextString` di akhir argumen
-          const prompt = promptPrefix + promptService.buildPrompt(
-            effectiveMessage,
-            contextString,
-            pageContext,
-            detectedIntent,
-            elementContext,
-            templateContextString,
-            responseMode // Teruskan preferensi panjang jawaban ke AI
-          );
-
-          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), process.env.AI_GEMINI_TIMEOUT_MS || 15000));
-          const geminiResult = await Promise.race([geminiService.generateWithFallback(prompt), timeoutPromise]);
-
-          if (geminiResult.ok) {
-            usedModel = geminiResult.model;
-            aiUsage = aiRateLimitService.consume(sessionId);
-
-            if (geminiResult.text.includes('[SYSTEM_FLAG_SARA_VIOLATION]')) {
-              safetyState.warnings += 1;
-              if (safetyState.warnings >= 3) safetyState.locked = true;
-              await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } });
-
-              botMessageText = 'Sistem AI mendeteksi bahasa yang tidak pantas atau tidak sopan. Mari gunakan bahasa yang baik ya.';
-              if (safetyState.locked) botMessageText = 'Akses chat dikunci karena pelanggaran berulang.';
-              responseSource = 'system';
-              actions = [];
-            } else {
-              botMessageText = geminiResult.text;
-              responseSource = 'ai';
-              actions = forceAI
-                ? (sysRes.actions || []).filter((action) => ['inline_visual', 'open_pdf_viewer'].includes(action.type))
-                : (sysRes.actions || []);
-            }
-          } else if (geminiResult.quotaFallback) {
-            aiErrorFallback = true;
-            quotaFallback = true;
-            responseSource = 'fallback';
-            const fallbackRes = systemResponseService.buildSystemResponse({
-              message: effectiveMessage,
-              intent: detectedIntent,
-              moderationResult,
-              retrievalResults,
-              pageContext,
-              elementContext,
-              aiUsage,
-              matchedTemplate,
-              templateMap,
-              burnoutCount: safetyState.burnout_count,
-              isErrorFallback: true,
-              fallbackType: 'quota'
-            });
-            botMessageText = fallbackRes.text;
-            actions = fallbackRes.actions || [];
-          }
-        } catch (error) {
-          aiErrorFallback = true;
-          responseSource = 'fallback';
-          const fallbackRes = systemResponseService.buildSystemResponse({
+        if (cacheEligible) {
+          await saveMaterialAnswerCache({
+            projectId,
             message: effectiveMessage,
-            intent: detectedIntent,
-            moderationResult,
+            answer: botMessageText,
             retrievalResults,
-            pageContext,
-            elementContext,
-            aiUsage,
-            matchedTemplate,
-            templateMap,
-            burnoutCount: safetyState.burnout_count,
-            isErrorFallback: true,
-            fallbackType: 'error'
+            intent: detectedIntent,
+            usedModel
           });
-          botMessageText = fallbackRes.text;
-          actions = fallbackRes.actions || [];
         }
+      } else if (geminiResult.quotaFallback) {
+        aiErrorFallback = true;
+        quotaFallback = true;
+        botMessageText = 'AI sedang kehabisan kuota atau terlalu sibuk. ' + (sysRes.text || '');
       }
-
-      if (!botMessageText) {
-        botMessageText = sysRes.text;
-        actions = sysRes.actions || [];
-        responseSource = 'system';
-      }
+    } catch (error) {
+      aiErrorFallback = true;
+      botMessageText = 'Terjadi kesalahan sistem AI. ' + (sysRes.text || '');
     }
 
+    if (!botMessageText) {
+      botMessageText = sysRes.text;
+      actions = [
+        ...(sysRes.actions || []),
+        ...buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage))
+      ];
+      responseSource = 'system';
+    }
+
+    botMessageText = addStudentGreeting(botMessageText, studentName);
+
     await chatModel.createMessage({
-      session_id: sessionId,
-      role: 'assistant',
-      message: botMessageText,
-      intent: detectedIntent,
-      context_used: {
-        response_source: responseSource,
-        actions,
-        ai_error_fallback: aiErrorFallback,
-        quota_fallback: quotaFallback,
-        used_model: usedModel,
-        force_ai: !!forceAI,
-        template_page_type: matchedTemplate?.page_type || null
-      }
+      session_id: sessionId, role: 'assistant', message: botMessageText, intent: detectedIntent,
+      context_used: { response_source: responseSource, actions, ai_error_fallback: aiErrorFallback, quota_fallback: quotaFallback, used_model: usedModel }
     });
 
     return {
-      intent: detectedIntent,
-      response_source: responseSource,
-      ai_usage: aiUsage,
-      ai_error_fallback: aiErrorFallback,
-      quota_fallback: quotaFallback,
-      used_model: usedModel,
-      is_locked: safetyState.locked,
-      warnings: safetyState.warnings,
+      intent: detectedIntent, response_source: responseSource, ai_usage: aiUsage,
+      ai_error_fallback: aiErrorFallback, quota_fallback: quotaFallback, used_model: usedModel,
+      is_locked: safetyState.locked, warnings: safetyState.warnings,
       botMessage: { message: botMessageText, actions }
     };
   }

@@ -10,6 +10,7 @@ const ragRoutes = require('./rag.routes');
 const authController = require('../controllers/auth.controller');
 const logRoutes = require('./log.routes');
 const templateRoutes = require('./template.routes');
+const moodleRoutes = require('./moodle.routes');
 
 const router = express.Router();
 
@@ -23,5 +24,6 @@ router.use('/rag', ragRoutes);
 router.post('/auth/login', authController.login);
 router.use('/logs', logRoutes);
 router.use('/page-templates', templateRoutes);
+router.use('/moodle', moodleRoutes);
 
 module.exports = router;
