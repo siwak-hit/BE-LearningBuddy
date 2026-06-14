@@ -20,6 +20,27 @@ app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 app.use(rateLimitMiddleware);
 
+app.get('/', (req, res) => {
+  res.json({
+    status: 'success',
+    message: 'AI Learning Buddy API aktif',
+    available_base_path: '/api'
+  });
+});
+
+app.get('/api', (req, res) => {
+  res.json({
+    status: 'success',
+    message: 'API base aktif',
+    available_routes: [
+      '/api/health',
+      '/api/projects',
+      '/api/chat',
+      '/api/moodle'
+    ]
+  });
+});
+
 app.use('/api', routes);
 
 app.use((req, res) => {
