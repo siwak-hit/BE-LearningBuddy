@@ -17,6 +17,18 @@ const aiResponseCacheModel = require('../../models/aiResponseCache.model');
 const aiQueueService = require('../ai/aiQueue.service');
 const lmsContextService = require('../moodle/lms-context.service');
 
+const REQUEST_TIMEOUT_MS = parseInt(process.env.CHAT_REQUEST_TIMEOUT_MS || '20000', 10);
+const AI_REQUEST_TIMEOUT_MS = parseInt(process.env.AI_REQUEST_TIMEOUT_MS || '18000', 10);
+
+function withTimeout(promiseFactory, timeoutMs = REQUEST_TIMEOUT_MS, label = 'request') {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout setelah ${Math.round(timeoutMs / 1000)} detik`)), timeoutMs);
+  });
+  const taskPromise = typeof promiseFactory === 'function' ? promiseFactory() : promiseFactory;
+  return Promise.race([taskPromise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
 function safeParseObject(value, fallback = {}) {
   if (!value) return fallback;
   if (typeof value === 'object') return value;
@@ -87,6 +99,67 @@ function looksLikeMultipleChoiceQuestion(message = '') {
   return /(^|\n|\s)([A-Da-d])[\).]/.test(raw) || /\b(pilihan ganda|jawaban yang benar|pilih jawaban|opsi a|opsi b|opsi c|opsi d)\b/i.test(raw);
 }
 
+
+function extractMaterialSubject(message = '') {
+  const raw = String(message || '').trim().replace(/[?!.]+$/g, '');
+  const lower = raw.toLowerCase();
+  const match = lower.match(/^(?:apa\s+itu|pengertian|definisi|maksud\s+dari|jelaskan(?:\s+tentang)?|fungsi|contoh|cara)\s+(.+)$/i);
+  return normalizeText(match?.[1] || lower);
+}
+
+function isMaterialQuestion(message = '', detectedIntent = '') {
+  const text = normalizeText(message);
+  if (['penjelasan_materi', 'general_learning_help'].includes(String(detectedIntent || ''))) return true;
+  return /\b(apa itu|pengertian|definisi|maksud|jelaskan|fungsi|contoh|dampak|manfaat|jenis|cara)\b/.test(text);
+}
+
+function materialContextLooksReliable(message = '', retrievalResults = []) {
+  if (!retrievalResults.length) return false;
+  const subject = extractMaterialSubject(message);
+  const q = normalizeText(message);
+  const top = retrievalResults[0] || {};
+  const metadata = top.metadata || {};
+  const haystack = normalizeText([
+    top.title,
+    top.topic,
+    top.content,
+    metadata.module_name,
+    metadata.section_name,
+    metadata.highlight_text
+  ].filter(Boolean).join(' '));
+
+  const isMediaSocial = /\b(media sosial|sosial media|sosmed|medsos)\b/.test(q) || subject === 'media sosial' || subject === 'sosial media';
+  const isCms = /\b(cms|content management system|content manajemen sistem)\b/.test(q) || subject === 'cms';
+  const isWordPress = /\b(wordpress|word press|wp)\b/.test(q) || subject === 'wordpress';
+
+  if (isMediaSocial) {
+    if (/\b(cms|wordpress|word press|joomla|drupal|wix|plugin)\b/.test(haystack) && !/\b(media sosial|sosial media|medsos|sosmed|jejaring sosial|social network)\b/.test(haystack)) return false;
+    return /\b(media sosial|sosial media|medsos|sosmed|jejaring sosial|social network|interaksi sosial)\b/.test(haystack);
+  }
+
+  if (isCms) {
+    if (/\b(media sosial|sosial media|kisi kisi|asat|pengumuman)\b/.test(haystack) && !/\b(cms|content management system|content manajemen sistem|wordpress|joomla|drupal|wix)\b/.test(haystack)) return false;
+    return /\b(cms|content management system|content manajemen sistem|wordpress|joomla|drupal|wix|website)\b/.test(haystack);
+  }
+
+  if (isWordPress) {
+    if (/\b(media sosial|sosial media|kisi kisi|asat|pengumuman)\b/.test(haystack) && !/\b(cms|wordpress|word press|website)\b/.test(haystack)) return false;
+    return /\b(wordpress|word press|cms|website)\b/.test(haystack);
+  }
+
+  const importantWords = subject
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !['apa','itu','ini','dan','yang','dari','ke','di','untuk','cara'].includes(w));
+  if (!importantWords.length) return true;
+  return importantWords.some((word) => haystack.includes(word));
+}
+
+function buildMaterialNotFoundMessage(message = '') {
+  const subject = extractMaterialSubject(message);
+  const label = subject ? `tentang **${escapeHtml(subject)}**` : 'yang kamu tanyakan';
+  return `Aku belum menemukan materi yang cocok ${label} di sumber kelasmu. Jadi aku tidak mau menebak-nebak jawaban.\n\nCoba cek lagi kata kuncinya, atau minta guru/admin memastikan materi Moodle untuk topik itu sudah disinkronkan.`;
+}
+
 function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
   const actions = [];
   const pdfActions = [];
@@ -112,9 +185,7 @@ function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
     const isMoodle = sourceOrigin === 'moodle' || /\/mod\/(page|resource|book)\/view\.php/i.test(String(fileUrl)) || String(modname).length > 0;
 
     if (isMoodle) {
-      if (!moodleByUrl.has(fileUrl) && moodleMaterials.length >= MAX_MOODLE_MATERIALS) {
-        return;
-      }
+      if (!moodleByUrl.has(fileUrl) && moodleMaterials.length >= MAX_MOODLE_MATERIALS) return;
 
       if (!moodleByUrl.has(fileUrl)) {
         const material = {
@@ -137,8 +208,7 @@ function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
         moodleMaterials.push(material);
       } else if (contentSnippet) {
         const material = moodleByUrl.get(fileUrl);
-        const normalized = contentSnippet.toLowerCase();
-        const duplicate = (material.snippets || []).some((old) => String(old || '').toLowerCase() === normalized);
+        const duplicate = (material.snippets || []).some((old) => String(old || '').toLowerCase() === contentSnippet.toLowerCase());
         if (!duplicate && material.snippets.length < 8) material.snippets.push(contentSnippet);
         material.content = material.snippets.join('\n\n');
       }
@@ -169,112 +239,6 @@ function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
   return [...actions, ...pdfActions];
 }
 
-function isLearningMaterialQuestion(message = '', detectedIntent = '') {
-  const text = normalizeText(message);
-  if (['penjelasan_materi', 'general_learning_help'].includes(String(detectedIntent || ''))) return true;
-  return /\b(apa itu|pengertian|definisi|maksud|jelaskan|contoh|dampak|manfaat|jenis|ciri|cara|fungsi|kenapa|mengapa|bagaimana|bedanya|perbedaan)\b/i.test(String(message || ''))
-    || /\b(media sosial|sosial media|sosmed|hoax|hoaks|cyberbullying|cms|spreadsheet|vlookup|hlookup|rumus|informatika)\b/.test(text);
-}
-
-function isOpenMaterialRequest(message = '') {
-  const text = normalizeText(message);
-  return /\b(buka|lihat|tampilkan|open)\b/.test(text) && /\b(materi|modul|bahan|bacaan|pertemuan|minggu)\b/.test(text);
-}
-
-function buildCoachingContext(contextString = '') {
-  return `
-[ATURAN JAWABAN MATERI]
-- Jawab hanya berdasarkan KONTEKS MATERI di bawah. Kalau konteks tidak cukup, bilang materi belum cukup jelas untuk menjawab.
-- Jangan langsung memberi jawaban final yang kaku. Bantu siswa berpikir dengan contoh dekat, pertanyaan pancingan ringan, lalu simpulkan singkat.
-- Gaya kelas 8 SMP: ramah, pendek, tidak bertele-tele, maksimal 2-4 paragraf pendek.
-- Setelah membantu berpikir, arahkan siswa untuk membuka tombol "Lihat materi" bila ingin membaca sumbernya.
-- Jika konteks hanya menyebut istilah sebagai contoh singkat, jangan ubah menjadi definisi besar. Jelaskan batasnya: materi hanya menyinggung istilah itu sebagai contoh.
-- Untuk soal pilihan ganda/quiz, jangan memilih opsi A/B/C/D dan jangan mengulang teks opsi jawaban.
-[/ATURAN JAWABAN MATERI]
-
-[KONTEKS MATERI]
-${contextString || 'Tidak ada konteks spesifik yang ditemukan.'}
-[/KONTEKS MATERI]`;
-}
-
-function buildMaterialSystemPrompt({ hasRetrieval = false, hasCache = false } = {}) {
-  if (hasCache) return 'Aku menemukan jawaban yang pernah dijelaskan sebelumnya untuk pertanyaan serupa.';
-  if (hasRetrieval) {
-    return 'Aku nemu materi yang cocok. Kalau kamu mau penjelasan yang lebih enak, pilih **AI Singkat** atau **AI Detail**. Kamu juga bisa buka materinya lewat tombol di bawah.';
-  }
-  return 'Aku belum nemu materi yang pas. Coba pakai kata kunci yang lebih spesifik, atau pastikan materi Moodle sudah disinkronkan oleh admin/guru.';
-}
-
-function buildQuizCopyPasteResponse({ studentName = '', retrievalResults = [] } = {}) {
-  const name = String(studentName || 'teman').trim() || 'teman';
-  const sourceHint = retrievalResults.length > 0
-    ? '\n\nAku sudah menemukan materi yang berkaitan. Buka tombol **Lihat materi** kalau mau membaca sumbernya dulu.'
-    : '';
-
-  return `Halo **${escapeHtml(name)}**, uppss... sepertinya kamu sedang mengerjakan soal kuis ya.\n\nAku diprogram untuk **tidak memilihkan jawaban langsung** atau menebak opsi A/B/C/D. Tapi aku tetap bisa bantu kamu mikir.\n\nCoba pahami inti konsepnya dulu: lihat fungsi/kegunaan istilah yang ditanyakan, lalu cocokkan dengan pilihan yang maknanya paling mendekati. Jangan fokus ke huruf opsinya, fokus ke arti dan konteksnya.${sourceHint}`;
-}
-
-function buildCacheLookup({ projectId, message, retrievalResults = [] }) {
-  const normalizedQuestion = aiResponseCacheModel.normalizeQuestion
-    ? aiResponseCacheModel.normalizeQuestion(message)
-    : normalizeText(message);
-  const contextHash = buildContextHash(retrievalResults);
-  const cacheKey = aiResponseCacheModel.buildCacheKey
-    ? aiResponseCacheModel.buildCacheKey(projectId, normalizedQuestion, contextHash)
-    : aiResponseCacheModel.hashText([projectId, normalizedQuestion, contextHash].join('|'));
-
-  return { normalizedQuestion, contextHash, cacheKey };
-}
-
-async function findCachedMaterialAnswer({ projectId, message, retrievalResults = [], intent }) {
-  try {
-    if (!projectId || !message) return null;
-    const { cacheKey, contextHash } = buildCacheLookup({ projectId, message, retrievalResults });
-    const exact = await aiResponseCacheModel.findByKey?.(projectId, cacheKey);
-    if (exact) {
-      await aiResponseCacheModel.incrementHit?.(exact.id).catch(() => {});
-      return exact;
-    }
-
-    const similar = await aiResponseCacheModel.findBestSimilar?.(projectId, message, {
-      intent,
-      contextHash,
-      threshold: 0.72
-    });
-    if (similar) {
-      await aiResponseCacheModel.incrementHit?.(similar.id).catch(() => {});
-      return similar;
-    }
-  } catch (error) {
-    console.warn('[chat.service] Cache lookup gagal:', error.message);
-  }
-  return null;
-}
-
-async function saveMaterialAnswerCache({ projectId, message, answer, retrievalResults = [], intent, usedModel }) {
-  try {
-    if (!projectId || !message || !answer || looksLikeMultipleChoiceQuestion(message)) return null;
-    const { normalizedQuestion, contextHash, cacheKey } = buildCacheLookup({ projectId, message, retrievalResults });
-    if (!normalizedQuestion || normalizedQuestion.length < 3) return null;
-
-    return aiResponseCacheModel.upsertCache?.({
-      project_id: projectId,
-      cache_key: cacheKey,
-      question: message,
-      normalized_question: normalizedQuestion,
-      answer,
-      response_source: 'ai_cache',
-      intent,
-      source_type: 'document_chunk',
-      context_hash: contextHash,
-      model: usedModel || null,
-      expires_at: getExpiresAt()
-    });
-  } catch (error) {
-    console.warn('[chat.service] Gagal menyimpan cache jawaban AI:', error.message);
-    return null;
-  }
-}
 
 // ============================================================
 // STATIC IMAGE TUTORIALS
@@ -292,8 +256,6 @@ function detailImage(...segments) {
   return publicAssetPath('DETAIL', ...segments);
 }
 
-const ENTRY_POINT_IMAGE = detailImage('ENTRY POINT.png');
-
 const STATIC_TUTORIALS = {
   buat_forum: {
     key: 'buat_forum',
@@ -306,7 +268,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Buka forum dari course',
         text: 'Klik salah satu forum pada course kamu. Contoh pada gambar adalah forum “Diskusi: Keuntungan CMS”.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL BUAT FORUM', '0.png')
       },
       {
         title: 'Klik Tambahkan topik diskusi',
@@ -348,7 +310,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Pilih diskusi yang ingin dibalas',
         text: 'Cek daftar diskusi yang ingin kamu balas. Setelah ketemu, klik judul diskusinya.',
-        image: detailImage('TUTORIAL REPLY FORUM', '1.png')
+        image: detailImage('TUTORIAL REPLY FORUM', '0.png')
       },
       {
         title: 'Klik tombol Balas',
@@ -380,7 +342,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Buka tugas dari course',
         text: 'Pilih aktivitas tugas dari course kamu. Baca judul tugas dan pastikan kamu membuka tugas yang benar.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '0.png')
       },
       {
         title: 'Baca instruksi tugas',
@@ -421,7 +383,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Perhatikan halaman course',
         text: 'Tetap di halaman course. Dari sini kamu bisa melihat menu yang tersedia untuk course tersebut.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL LIHAT AKTIVITAS', '0.png')
       },
       {
         title: 'Klik menu Aktivitas',
@@ -442,7 +404,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Perhatikan halaman course',
         text: 'Tetap di halaman course. Dari sini kamu bisa membuka menu nilai pada course tersebut.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL LIHAT NILAI', '0.png')
       },
       {
         title: 'Klik menu Nilai',
@@ -468,7 +430,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Mode desktop: cari ikon user',
         text: 'Jika memakai laptop/desktop, cari tombol dengan ikon user atau profil siswa pada bagian atas halaman.',
-        image: detailImage('TUTORIAL LOGOUT', '1.png')
+        image: detailImage('TUTORIAL LOGOUT', '1.png') // Folder logout tidak menggunakan base 0.png karena struktur aslinya langsung memisahkan visual desktop/mobile
       },
       {
         title: 'Mode handphone: cari tombol burger',
@@ -499,7 +461,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Pilih link kuis dari course',
         text: 'Klik link kuis yang ingin kamu kerjakan dari halaman course.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL QUIS', '0.png')
       },
       {
         title: 'Baca instruksi kuis',
@@ -901,6 +863,37 @@ function normalizeClassCode(value = '') {
   if (!match) return '';
 
   return match[1].replace(/\s+/g, '');
+}
+
+
+function detectClassMention(message = '') {
+  const text = String(message || '').toUpperCase();
+
+  // Deteksi kelas spesifik: 7A-7Z, 8A-8Z, 9A-9Z, 10A dst.
+  // Contoh yang ditangkap: "kelas 8A", "8 A", "9A", "kelas IX A".
+  const numericMatch = text.match(/(?:\bKELAS\s*)?\b(7|8|9|10|11|12)\s*([A-Z])\b/);
+  if (numericMatch) return `${numericMatch[1]}${numericMatch[2]}`.toUpperCase();
+
+  const romanMap = {
+    VII: '7',
+    VIII: '8',
+    IX: '9',
+    X: '10',
+    XI: '11',
+    XII: '12'
+  };
+  const romanMatch = text.match(/(?:\bKELAS\s*)?\b(VII|VIII|IX|X|XI|XII)\s*([A-Z])\b/);
+  if (romanMatch) return `${romanMap[romanMatch[1]] || romanMatch[1]}${romanMatch[2]}`.toUpperCase();
+
+  return '';
+}
+
+function buildClassIsolationResponse({ studentName = '', classCode = '', mentionedClass = '' } = {}) {
+  const name = studentName || 'teman';
+  const currentClass = classCode || 'kelas kamu';
+  const targetClass = mentionedClass || 'kelas lain';
+
+  return `Hai **${escapeHtml(name)}**,\n\nUntuk menjaga supaya jawabannya sesuai materi kamu, aku hanya bisa membantu berdasarkan konteks **kelas ${escapeHtml(currentClass)}**.\n\nKamu tadi menyebut **kelas ${escapeHtml(targetClass)}**, jadi aku belum bisa menjawab bagian itu. Kalau memang kelasmu berubah, mulai sesi ulang dan pilih kelas yang benar dulu ya.`;
 }
 
 function getClassCodeFromSession(session = {}) {
@@ -1585,7 +1578,27 @@ const chatService = {
     }
 
     const effectiveMessage = forceAI ? cleanFeedbackPrompt(message) : message;
-    let detectedIntent = intent || await intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI });
+
+    const mentionedClass = detectClassMention(effectiveMessage);
+    if (classCode && mentionedClass && mentionedClass !== classCode) {
+      const blockMessage = buildClassIsolationResponse({ studentName, classCode, mentionedClass });
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'class_scope_violation' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: blockMessage, intent: 'class_scope_violation', context_used: { response_source: 'system_class_guard' } });
+      return {
+        intent: 'class_scope_violation',
+        response_source: 'system',
+        ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        botMessage: { message: blockMessage, actions: [] }
+      };
+    }
+
+    let detectedIntent = intent || await withTimeout(
+      () => intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI }),
+      8000,
+      'intent detection'
+    ).catch(() => 'general_learning_help');
 
     // Guard tambahan: jangan biarkan pertanyaan status LMS seperti
     // "Quiz apa yang belum saya kerjakan?" salah masuk ke tutorial "Cara mengerjakan kuis".
@@ -1596,10 +1609,10 @@ const chatService = {
 
     if (LMS_INTENTS.includes(detectedIntent)) {
       try {
-        lmsContext = await lmsContextService.buildChatLmsContext({
+        lmsContext = await withTimeout(() => lmsContextService.buildChatLmsContext({
           projectId, sessionId, classCode, studentName, moodleUserId, studentEmail,
           courseId: fallbackCourseId, enrolledCourses, pageActivities, intent: detectedIntent
-        });
+        }), REQUEST_TIMEOUT_MS, 'moodle context');
       } catch (e) {
         console.error('[Chat Service] Error memuat LMS Context:', e.message);
       }
@@ -1692,7 +1705,25 @@ const chatService = {
       safetyState.warnings += 1;
       if (safetyState.warnings >= 3) safetyState.locked = true;
       await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } });
-      return { intent: detectedIntent, response_source: 'system', botMessage: { message: 'Bahasa tidak pantas terdeteksi.', actions: [] }, is_locked: safetyState.locked, warnings: safetyState.warnings, ai_usage: aiRateLimitService.getStatus(sessionId) };
+
+      const warningCount = Math.min(Number(safetyState.warnings || 1), 3);
+      const warningText = safetyState.locked
+        ? `Aku kunci dulu chat ini karena bahasa kasar sudah mencapai batas **${warningCount}/3**.
+
+Silakan minta **key pembuka** ke guru/instruktur melalui WhatsApp, lalu masukkan key tersebut di form yang muncul.`
+        : `Aku mendeteksi bahasa yang kurang pantas. Aku kasih kesempatan dulu ya: **${warningCount}/3**.
+
+Yuk lanjut ngobrol dengan bahasa yang lebih sopan supaya AI Buddy tetap bisa bantu belajar.`;
+
+      return {
+        intent: detectedIntent,
+        response_source: 'system',
+        botMessage: { message: warningText, actions: [] },
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        lock_reason: safetyState.locked ? 'profanity_limit' : null,
+        ai_usage: aiRateLimitService.getStatus(sessionId)
+      };
     }
 
     await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
@@ -1765,43 +1796,30 @@ const chatService = {
       LMS_INTENTS.includes(detectedIntent) ||
       isQuickVisualGuideIntent(detectedIntent);
 
-    const materialQuestion = isLearningMaterialQuestion(effectiveMessage, detectedIntent) || looksLikeMultipleChoiceQuestion(effectiveMessage);
-
     if (!shouldSkipRetrieval) {
       const retrievalQuery = canonicalizeRetrievalQuery(effectiveMessage);
-      const sourceTypeForRetrieval = materialQuestion ? 'document_chunk' : (expectedSourceType || 'all');
-      retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 8, { sourceType: sourceTypeForRetrieval });
+      retrievalResults = await withTimeout(
+        () => retrievalService.retrieve(projectId, retrievalQuery, pageContext, 8, {
+          sourceType: expectedSourceType || 'all',
+          classCode,
+          courseId: fallbackCourseId,
+          strictClassScope: true
+        }),
+        12000,
+        'retrieval'
+      );
       contextString = contextBuilderService.build(retrievalResults);
-      if (materialQuestion && retrievalResults.length > 0) {
-        contextString = buildCoachingContext(contextString);
-      }
     }
 
-    // Permintaan khusus: “buka materi”. Tampilkan pilihan materi Moodle dari chunk yang sudah tersinkron.
-    if (isOpenMaterialRequest(effectiveMessage) && !forceAI) {
-      const materials = await retrievalService.listMoodleMaterials(projectId, {
-        classCode,
-        courseId: fallbackCourseId,
-        limit: 24
-      }).catch((error) => {
-        console.warn('[chat.service] Gagal mengambil daftar materi Moodle:', error.message);
-        return [];
-      });
-
-      const messageText = materials.length > 0
-        ? 'Aku menemukan beberapa materi Moodle yang sudah tersinkron. Pilih pertemuan/materi yang ingin kamu buka.'
-        : 'Belum ada materi Moodle yang bisa ditampilkan. Pastikan admin sudah menekan Sinkron Moodle di menu Knowledge.';
-
-      const actions = materials.length > 0
-        ? [{ type: 'open_moodle_material_picker', label: 'Pilih materi', materials }]
-        : [];
-
+    const materialQuestion = isMaterialQuestion(effectiveMessage, detectedIntent) && !LMS_INTENTS.includes(detectedIntent);
+    if (materialQuestion && !shouldSkipRetrieval && !materialContextLooksReliable(effectiveMessage, retrievalResults)) {
+      const notFoundText = addStudentGreeting(buildMaterialNotFoundMessage(effectiveMessage), studentName);
       await chatModel.createMessage({
         session_id: sessionId,
         role: 'assistant',
-        message: addStudentGreeting(messageText, studentName),
+        message: notFoundText,
         intent: detectedIntent,
-        context_used: { response_source: 'system', actions, used_model: 'system_moodle_material_picker' }
+        context_used: { response_source: 'system_material_not_found', retrieval_count: retrievalResults.length }
       });
 
       return {
@@ -1810,64 +1828,8 @@ const chatService = {
         ai_usage: aiUsage,
         is_locked: safetyState.locked,
         warnings: safetyState.warnings,
-        botMessage: { message: addStudentGreeting(messageText, studentName), actions }
+        botMessage: { message: notFoundText, actions: [] }
       };
-    }
-
-    // Guard soal/quiz copas: jangan jawab opsi, tetap arahkan ke materi.
-    if (looksLikeMultipleChoiceQuestion(effectiveMessage)) {
-      const actions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
-      const guardedText = buildQuizCopyPasteResponse({ studentName, retrievalResults });
-
-      await chatModel.createMessage({
-        session_id: sessionId,
-        role: 'assistant',
-        message: guardedText,
-        intent: detectedIntent,
-        context_used: { response_source: 'system_quiz_guard', actions, used_model: 'system_quiz_guard' }
-      });
-
-      return {
-        intent: detectedIntent,
-        response_source: 'system',
-        ai_usage: aiUsage,
-        is_locked: safetyState.locked,
-        warnings: safetyState.warnings,
-        botMessage: { message: guardedText, actions }
-      };
-    }
-
-    // Cache AI untuk pertanyaan materi: kalau pernah dijawab AI, sistem ambil alih.
-    const cacheEligible = materialQuestion && retrievalResults.length > 0 && !LMS_INTENTS.includes(detectedIntent);
-    if (cacheEligible) {
-      const cachedAnswer = await findCachedMaterialAnswer({
-        projectId,
-        message: effectiveMessage,
-        retrievalResults,
-        intent: detectedIntent
-      });
-
-      if (cachedAnswer?.answer) {
-        const actions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
-        const cachedText = addStudentGreeting(String(cachedAnswer.answer || ''), studentName);
-
-        await chatModel.createMessage({
-          session_id: sessionId,
-          role: 'assistant',
-          message: cachedText,
-          intent: detectedIntent,
-          context_used: { response_source: 'system_ai_cache', actions, used_model: 'ai_response_cache', cache_id: cachedAnswer.id }
-        });
-
-        return {
-          intent: detectedIntent,
-          response_source: 'system',
-          ai_usage: aiUsage,
-          is_locked: safetyState.locked,
-          warnings: safetyState.warnings,
-          botMessage: { message: cachedText, actions }
-        };
-      }
     }
 
     // ========================================================
@@ -1879,45 +1841,24 @@ const chatService = {
       burnoutCount: safetyState.burnout_count, lmsContext: lmsContext
     });
 
-    // Mode Jawaban Sistem untuk pertanyaan materi:
-    // Jangan mengarang jawaban materi. Jika belum ada cache AI, arahkan siswa memilih AI Singkat/Detail.
-    if (responseMode === 'system' && !forceAI && materialQuestion && !LMS_INTENTS.includes(detectedIntent)) {
+    // Mode Jawaban Sistem untuk pertanyaan materi: jangan langsung masuk AI.
+    // Tampilkan ringkasan referensi + tombol PDF, lalu user bisa pilih mode AI bila butuh penjelasan bebas.
+    if (responseMode === 'system' && !forceAI && retrievalResults.length > 0 && !LMS_INTENTS.includes(detectedIntent)) {
       const sourceActions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
-      const systemText = buildMaterialSystemPrompt({ hasRetrieval: retrievalResults.length > 0 });
-      const actions = [
-        ...sourceActions,
-        {
-          type: 'ask_ai',
-          label: 'Jelaskan dengan AI Singkat',
-          payload: {
-            original_message: effectiveMessage,
-            message: effectiveMessage,
-            intent: detectedIntent,
-            responseMode: 'short',
-            forceAI: true,
-            expectedSourceType: 'document_chunk'
-          }
-        },
-        {
-          type: 'ask_ai',
-          label: 'Jelaskan dengan AI Detail',
-          payload: {
-            original_message: effectiveMessage,
-            message: effectiveMessage,
-            intent: detectedIntent,
-            responseMode: 'detail',
-            forceAI: true,
-            expectedSourceType: 'document_chunk'
-          }
-        }
-      ];
+      const first = retrievalResults[0] || {};
+      const previewText = String(first.content || first.chunk_text || '').replace(/\s+/g, ' ').trim();
+      const guardedText = looksLikeMultipleChoiceQuestion(effectiveMessage)
+        ? 'Aku tidak akan langsung memilihkan jawaban A/B/C/D. Aku bantu kamu memahami konsepnya dulu dari sumber materi berikut.'
+        : 'Aku menemukan materi yang berkaitan dari kelasmu. Baca ringkasan singkatnya, lalu buka tombol materi kalau ingin melihat sumbernya.';
+
+      const systemText = `${guardedText}\n\n[ACCORDION=${first.title || first.topic || 'Materi terkait'}]\n${previewText || 'Materi terkait ditemukan di dokumen sumber.'}\n[/ACCORDION]`;
 
       await chatModel.createMessage({
         session_id: sessionId,
         role: 'assistant',
         message: addStudentGreeting(systemText, studentName),
         intent: detectedIntent,
-        context_used: { response_source: 'system', actions, used_model: 'system_material_mode_router' }
+        context_used: { response_source: 'system', actions: sourceActions, used_model: 'system_material_reference' }
       });
 
       return {
@@ -1926,10 +1867,9 @@ const chatService = {
         ai_usage: aiUsage,
         is_locked: safetyState.locked,
         warnings: safetyState.warnings,
-        botMessage: { message: addStudentGreeting(systemText, studentName), actions }
+        botMessage: { message: addStudentGreeting(systemText, studentName), actions: sourceActions }
       };
     }
-
 
     const lmsIntents = LMS_INTENTS;
 
@@ -1978,8 +1918,18 @@ const chatService = {
     let usedModel = null;
 
     try {
-      const prompt = promptService.buildPrompt(effectiveMessage, contextString, pageContext, detectedIntent, elementContext, '', responseMode, lmsContext);
-      const geminiResult = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: detectedIntent, responseMode });
+      const guardedContextString = materialQuestion
+        ? `[ATURAN KHUSUS MATERI]
+Jawab hanya berdasarkan konteks materi di bawah. Kalau konteks tidak membahas pertanyaan user, katakan materi belum ditemukan dan jangan mengarang. Jangan mencampur topik CMS/WordPress dengan media sosial kecuali konteks memang menjelaskan hubungannya.
+[/ATURAN KHUSUS MATERI]
+
+${contextString}`
+        : contextString;
+      const prompt = promptService.buildPrompt(effectiveMessage, guardedContextString, pageContext, detectedIntent, elementContext, '', responseMode, lmsContext);
+      const geminiResult = await aiQueueService.add(
+        () => withTimeout(() => geminiService.generateWithFallback(prompt), AI_REQUEST_TIMEOUT_MS, 'AI'),
+        { sessionId, intent: detectedIntent, responseMode, timeoutMs: AI_REQUEST_TIMEOUT_MS }
+      );
 
       if (geminiResult.ok) {
         usedModel = geminiResult.model;
@@ -1990,17 +1940,6 @@ const chatService = {
           ...(sysRes.actions || []),
           ...buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage))
         ];
-
-        if (cacheEligible) {
-          await saveMaterialAnswerCache({
-            projectId,
-            message: effectiveMessage,
-            answer: botMessageText,
-            retrievalResults,
-            intent: detectedIntent,
-            usedModel
-          });
-        }
       } else if (geminiResult.quotaFallback) {
         aiErrorFallback = true;
         quotaFallback = true;

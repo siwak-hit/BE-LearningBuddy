@@ -1,109 +1,121 @@
 // src/services/ai/aiQueue.service.js
+// Queue AI yang lebih stabil untuk beban 200-400 user.
+// Fitur:
+// - global concurrency
+// - per-session serialization ringan
+// - max queue guard
+// - timeout per job
+// - priority sederhana untuk mode system/short/detail
 
-const AI_QUEUE_CONCURRENCY = parseInt(process.env.AI_QUEUE_CONCURRENCY || '4', 10);
-const AI_QUEUE_MAX_WAITING = parseInt(process.env.AI_QUEUE_MAX_WAITING || '80', 10);
-const AI_QUEUE_JOB_TIMEOUT_MS = parseInt(process.env.AI_QUEUE_JOB_TIMEOUT_MS || '20000', 10);
+const DEFAULT_CONCURRENCY = Math.max(1, parseInt(process.env.AI_QUEUE_CONCURRENCY || '4', 10));
+const DEFAULT_MAX_QUEUE = Math.max(10, parseInt(process.env.AI_QUEUE_MAX_SIZE || '120', 10));
+const DEFAULT_TIMEOUT_MS = Math.max(5000, parseInt(process.env.AI_QUEUE_TIMEOUT_MS || '20000', 10));
 
-function withTimeout(promise, timeoutMs) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => {
-        const error = new Error('AI_QUEUE_JOB_TIMEOUT');
-        error.code = 'AI_QUEUE_JOB_TIMEOUT';
-        reject(error);
-      }, timeoutMs);
-    })
-  ]);
+function priorityOf(meta = {}) {
+  const mode = String(meta.responseMode || '').toLowerCase();
+  if (mode === 'short') return 30;
+  if (mode === 'detail') return 20;
+  if (mode === 'system') return 40;
+  return 10;
 }
 
-const aiQueueService = {
-  running: 0,
-  waiting: [],
+class AiQueueService {
+  constructor() {
+    this.concurrency = DEFAULT_CONCURRENCY;
+    this.maxQueue = DEFAULT_MAX_QUEUE;
+    this.running = 0;
+    this.queue = [];
+    this.sessionLocks = new Set();
+    this.metrics = { accepted: 0, completed: 0, rejected: 0, failed: 0 };
+  }
 
   getStatus() {
     return {
       running: this.running,
-      waiting: this.waiting.length,
-      concurrency: AI_QUEUE_CONCURRENCY,
-      maxWaiting: AI_QUEUE_MAX_WAITING
+      queued: this.queue.length,
+      concurrency: this.concurrency,
+      maxQueue: this.maxQueue,
+      metrics: this.metrics
     };
-  },
-
-  canAccept() {
-    return this.waiting.length < AI_QUEUE_MAX_WAITING;
-  },
+  }
 
   add(taskFn, meta = {}) {
-    if (typeof taskFn !== 'function') {
-      return Promise.reject(new Error('AI_QUEUE_TASK_MUST_BE_FUNCTION'));
-    }
-
-    if (!this.canAccept()) {
+    if (this.queue.length >= this.maxQueue) {
+      this.metrics.rejected += 1;
       return Promise.resolve({
         ok: false,
-        queueFallback: true,
-        text: null,
-        model: null,
-        queueStatus: this.getStatus()
+        quotaFallback: true,
+        text: 'Server AI sedang ramai. Coba beberapa saat lagi ya.',
+        error: 'AI_QUEUE_FULL'
       });
     }
 
+    this.metrics.accepted += 1;
     return new Promise((resolve) => {
-      this.waiting.push({
+      const job = {
         taskFn,
         meta,
         resolve,
-        createdAt: Date.now()
-      });
-
-      this._next();
+        createdAt: Date.now(),
+        priority: priorityOf(meta)
+      };
+      this.queue.push(job);
+      this.queue.sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt);
+      this.drain();
     });
-  },
+  }
 
-  _next() {
-    while (this.running < AI_QUEUE_CONCURRENCY && this.waiting.length > 0) {
-      const job = this.waiting.shift();
-      this.running += 1;
+  canRun(job) {
+    const sessionId = job?.meta?.sessionId;
+    if (!sessionId) return true;
+    return !this.sessionLocks.has(sessionId);
+  }
 
-      const queueWaitMs = Date.now() - job.createdAt;
+  takeNextJob() {
+    const index = this.queue.findIndex((job) => this.canRun(job));
+    if (index < 0) return null;
+    return this.queue.splice(index, 1)[0];
+  }
 
-      console.log('[AI Queue] Start job', {
-        running: this.running,
-        waiting: this.waiting.length,
-        queueWaitMs,
-        meta: job.meta
-      });
-
-      withTimeout(Promise.resolve().then(job.taskFn), AI_QUEUE_JOB_TIMEOUT_MS)
-        .then((result) => {
-          job.resolve({
-            ...result,
-            queueStatus: this.getStatus(),
-            queueWaitMs
-          });
-        })
-        .catch((error) => {
-          console.error('[AI Queue] Job error:', error.message);
-
-          job.resolve({
-            ok: false,
-            queueFallback: false,
-            errorFallback: true,
-            errorCode: error.code || 'AI_QUEUE_ERROR',
-            errorMessage: error.message,
-            text: null,
-            model: null,
-            queueStatus: this.getStatus(),
-            queueWaitMs
-          });
-        })
-        .finally(() => {
-          this.running = Math.max(0, this.running - 1);
-          this._next();
-        });
+  drain() {
+    while (this.running < this.concurrency) {
+      const job = this.takeNextJob();
+      if (!job) break;
+      this.run(job);
     }
   }
-};
 
-module.exports = aiQueueService;
+  async run(job) {
+    this.running += 1;
+    const sessionId = job?.meta?.sessionId;
+    if (sessionId) this.sessionLocks.add(sessionId);
+
+    const timeoutMs = Number(job?.meta?.timeoutMs || DEFAULT_TIMEOUT_MS);
+    let timeoutId;
+
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`AI queue timeout setelah ${Math.round(timeoutMs / 1000)} detik`)), timeoutMs);
+      });
+
+      const result = await Promise.race([job.taskFn(), timeoutPromise]);
+      this.metrics.completed += 1;
+      job.resolve(result);
+    } catch (error) {
+      this.metrics.failed += 1;
+      job.resolve({
+        ok: false,
+        quotaFallback: true,
+        text: 'AI terlalu lama merespons. Coba ulangi dengan pertanyaan yang lebih singkat ya.',
+        error: error.message
+      });
+    } finally {
+      clearTimeout(timeoutId);
+      if (sessionId) this.sessionLocks.delete(sessionId);
+      this.running = Math.max(0, this.running - 1);
+      setImmediate(() => this.drain());
+    }
+  }
+}
+
+module.exports = new AiQueueService();

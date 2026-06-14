@@ -86,7 +86,6 @@ const moodleController = {
       };
 
       const saved = await moodleConfigModel.upsertByProjectId(projectId, payload);
-      if (typeof moodleService.clearConfigCache === 'function') moodleService.clearConfigCache(projectId);
 
       if (discovered?.course_routes?.length) {
         await lmsRouteModel.bulkUpsertCourseRoutes(projectId, discovered.course_routes).catch((err) => {
@@ -266,7 +265,6 @@ const moodleController = {
       }
 
       const routes = await lmsRouteModel.bulkUpsertCourseRoutes(projectId, discovered.course_routes);
-      if (typeof moodleService.clearConfigCache === 'function') moodleService.clearConfigCache(projectId);
 
       return response.success(res, 'Sinkronisasi course map berhasil', {
         course_map: newMap,
@@ -320,14 +318,11 @@ const moodleController = {
 
   async syncCourse(req, res) {
     try {
-      const { projectId, classCode, courseId, resetMoodleChunks, materialOnly = true } = req.body;
+      const { projectId, classCode, courseId, resetMoodleChunks } = req.body;
       if (!projectId || !classCode || !courseId) return response.error(res, 'Missing parameters', null, 400);
 
-      const summary = await moodleContentSyncService.syncCourseContent(projectId, classCode, courseId, {
-        resetMoodleChunks,
-        materialOnly: materialOnly !== false
-      });
-      return response.success(res, 'Sync Moodle materi selesai', summary);
+      const summary = await moodleContentSyncService.syncCourseContent(projectId, classCode, courseId, { resetMoodleChunks });
+      return response.success(res, 'Sync Moodle content selesai', summary);
     } catch (error) {
       return response.error(res, 'Gagal sync course', error.message, 500);
     }
@@ -335,24 +330,13 @@ const moodleController = {
 
   async syncAll(req, res) {
     try {
-      const {
-        projectId,
-        resetMoodleChunks,
-        materialOnly = true,
-        autoDiscover = false,
-        skipCourseInfo = true
-      } = req.body;
+      const { projectId, resetMoodleChunks } = req.body;
       if (!projectId) return response.error(res, 'Missing projectId', null, 400);
 
-      const summary = await moodleContentSyncService.syncAllCourses(projectId, {
-        resetMoodleChunks,
-        materialOnly: materialOnly !== false,
-        autoDiscover: autoDiscover === true,
-        skipCourseInfo: skipCourseInfo !== false
-      });
-      return response.success(res, 'Sync materi Moodle selesai', summary);
+      const summary = await moodleContentSyncService.syncAllCourses(projectId, { resetMoodleChunks });
+      return response.success(res, 'Sync semua course Moodle selesai', summary);
     } catch (error) {
-      return response.error(res, 'Gagal sync materi Moodle', error.message, 500);
+      return response.error(res, 'Gagal sync semua course', error.message, 500);
     }
   }
 };

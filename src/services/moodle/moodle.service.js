@@ -1,28 +1,17 @@
 const moodleConfigModel = require('../../models/moodleConfig.model');
 
+const MOODLE_REQUEST_TIMEOUT_MS = parseInt(process.env.MOODLE_REQUEST_TIMEOUT_MS || '18000', 10);
 const MOODLE_CONFIG_CACHE_TTL_MS = parseInt(process.env.MOODLE_CONFIG_CACHE_TTL_MS || '300000', 10);
 const moodleConfigCache = new Map();
 
 function readConfigCache(projectId) {
-  if (!projectId) return null;
   const hit = moodleConfigCache.get(projectId);
   if (!hit) return null;
-  if (Date.now() - hit.cachedAt > MOODLE_CONFIG_CACHE_TTL_MS) {
-    moodleConfigCache.delete(projectId);
-    return null;
-  }
+  if (Date.now() - hit.cachedAt > MOODLE_CONFIG_CACHE_TTL_MS) { moodleConfigCache.delete(projectId); return null; }
   return hit.config;
 }
-
-function writeConfigCache(projectId, config) {
-  if (!projectId || !config) return;
-  moodleConfigCache.set(projectId, { config, cachedAt: Date.now() });
-}
-
-function clearConfigCache(projectId = '') {
-  if (projectId) moodleConfigCache.delete(projectId);
-  else moodleConfigCache.clear();
-}
+function writeConfigCache(projectId, config) { if (projectId && config) moodleConfigCache.set(projectId, { config, cachedAt: Date.now() }); }
+function clearConfigCache(projectId = '') { if (projectId) moodleConfigCache.delete(projectId); else moodleConfigCache.clear(); }
 
 
 function normalizeText(value = '') {
@@ -174,12 +163,10 @@ const moodleService = {
       const cached = readConfigCache(projectId);
       if (cached) return cached;
     }
-
     const config = await moodleConfigModel.findByProjectId(projectId);
     if (!config || !config.token || !config.rest_endpoint) {
       throw new Error('Konfigurasi Moodle belum diatur atau token tidak ditemukan');
     }
-
     writeConfigCache(projectId, config);
     return config;
   },
@@ -200,9 +187,20 @@ const moodleService = {
     return url.toString();
   },
 
-  async callDirect(endpoint, token, wsfunction, params = {}) {
+  async callDirect(endpoint, token, wsfunction, params = {}, options = {}) {
     const url = moodleService.buildRestUrl(endpoint, token, wsfunction, params);
-    const response = await fetch(url, { method: 'POST' });
+    const timeoutMs = Number(options.timeoutMs || MOODLE_REQUEST_TIMEOUT_MS);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(url, { method: 'POST', signal: controller.signal });
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error(`Moodle request timeout setelah ${Math.round(timeoutMs / 1000)} detik`);
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
 
@@ -213,9 +211,9 @@ const moodleService = {
     return data;
   },
 
-  async callByProjectId(projectId, wsfunction, params = {}) {
+  async callByProjectId(projectId, wsfunction, params = {}, options = {}) {
     const config = await moodleService.getConfig(projectId);
-    return moodleService.callDirect(config.rest_endpoint, config.token, wsfunction, params);
+    return moodleService.callDirect(config.rest_endpoint, config.token, wsfunction, params, options);
   },
 
   async testConnection(endpoint, token) {
