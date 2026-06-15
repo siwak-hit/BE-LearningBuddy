@@ -108,14 +108,30 @@ function isLockedStatus(activity = {}) {
     || status.includes('restricted')
     || status.includes('not available');
 }
+function isSubmittedWaitingGrade(activity = {}) {
+  const status = String(activity.status || '').toLowerCase();
+  return activity.submitted_not_graded === true
+    || status.includes('belum dinilai')
+    || status.includes('belum diberi nilai');
+}
+
 function isIncompleteStatus(activity = {}) {
   const status = String(activity.status || '').toLowerCase();
+  if (isSubmittedWaitingGrade(activity) || activity.is_submitted === true) return false;
   return isLockedStatus(activity) || status.includes('belum') || status.includes('not completed') || status.includes('incomplete') || activity.is_completed === false;
 }
 
 function isCompletedStatus(activity = {}) {
   const status = String(activity.status || '').toLowerCase();
-  return !isLockedStatus(activity) && (status.includes('selesai') || status.includes('completed') || activity.is_completed === true);
+  return !isLockedStatus(activity) && (
+    status.includes('selesai')
+    || status.includes('completed')
+    || status.includes('sudah mengerjakan')
+    || status.includes('sudah dikumpulkan')
+    || status.includes('submitted')
+    || activity.is_completed === true
+    || activity.is_submitted === true
+  );
 }
 
 function formatDeadline(deadline) {
@@ -146,6 +162,12 @@ function statusBadge(activity = {}) {
   if (isLockedStatus(activity)) {
     const info = activity.availability_info ? ` title="${escapeHtml(activity.availability_info)}"` : '';
     return `<span class="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700 px-2 py-1 text-[11px] font-bold"${info}><i class="fa-solid fa-lock"></i> Belum terbuka</span>`;
+  }
+  if (isSubmittedWaitingGrade(activity)) {
+    const label = normalizeActivityType(activity.type || activity.moodle_activity_type || activity.activity_type) === 'quiz'
+      ? 'Sudah mengerjakan, belum dinilai'
+      : 'Sudah dikumpulkan, belum dinilai';
+    return `<span class="inline-flex items-center gap-1 rounded-full bg-sky-50 border border-sky-200 text-sky-700 px-2 py-1 text-[11px] font-bold"><i class="fa-solid fa-clock-rotate-left"></i> ${label}</span>`;
   }
   if (isCompletedStatus(activity)) {
     return '<span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 text-[11px] font-bold"><i class="fa-solid fa-check"></i> Selesai</span>';
@@ -188,9 +210,9 @@ function actionButtons(activity = {}) {
 
   return `
     <div class="alb-task-actions" onclick="event.stopPropagation();" style="display:flex;flex-direction:row;align-items:center;gap:6px;flex-wrap:nowrap;">
-      <button type="button" class="btn-return-source alb-btn-vclass-primary" data-url="${url}" data-page-type="${pageType}" data-title="${title}" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:7px 12px;border-radius:8px;border:0;background:#0f172a;color:#ffffff;font-size:12px;font-weight:800;line-height:1.2;white-space:nowrap;cursor:pointer;">
-        <i class="fa-solid fa-eye"></i><span>${locked ? 'Lihat di VClass' : label}</span>
-      </button>
+      <a href="${url}" target="_blank" rel="noopener noreferrer" class="alb-btn-vclass-primary" title="${title}" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:7px 12px;border-radius:8px;border:0;background:#0f172a;color:#ffffff;font-size:12px;font-weight:800;line-height:1.2;white-space:nowrap;cursor:pointer;text-decoration:none;">
+        <i class="fa-solid fa-up-right-from-square"></i><span>${locked ? 'Lihat di VClass' : label}</span>
+      </a>
       <a href="${url}" target="_blank" rel="noopener noreferrer" class="alb-btn-vclass-newtab" title="Buka di tab baru" style="display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border-radius:8px;border:1px solid #e2e8f0;background:#ffffff;color:#475569;font-size:13px;line-height:1;text-decoration:none;white-space:nowrap;">
         <i class="fa-solid fa-up-right-from-square"></i>
       </a>
@@ -208,7 +230,7 @@ function emptyStateHtml({ title, subtitle, actionUrl = '' }) {
         </div>
         <div style="font-size:15px;font-weight:800;color:#0f172a;margin-bottom:6px;line-height:1.35;">${escapeHtml(title)}</div>
         <div style="font-size:13px;color:#64748b;max-width:380px;margin:0 auto;line-height:1.6;">${escapeHtml(subtitle)}</div>
-        ${actionUrl ? `<div style="margin-top:16px;"><button type="button" class="btn-return-source" data-url="${safeUrl}" data-title="Buka VClass" style="display:inline-flex;align-items:center;gap:6px;background:#0f172a;color:#fff;border:0;border-radius:999px;padding:9px 18px;font-size:13px;font-weight:800;cursor:pointer;"><i class="fa-solid fa-eye"></i> Cek Langsung di VClass</button></div>` : ''}
+        ${actionUrl ? `<div style="margin-top:16px;"><a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;background:#0f172a;color:#fff;border:0;border-radius:999px;padding:9px 18px;font-size:13px;font-weight:800;cursor:pointer;text-decoration:none;"><i class="fa-solid fa-up-right-from-square"></i> Cek Langsung di VClass</a></div>` : ''}
       </div>
     </details>`;
 }
@@ -507,6 +529,15 @@ const systemResponseService = {
     const lmsIntents = ['cek_course_saya', 'cek_pengajar_course', 'cek_aktivitas_course', 'cek_tugas_belum_selesai', 'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_deadline_hari_ini', 'cek_deadline_terdekat', 'buka_aktivitas'];
 
     if (lmsIntents.includes(intent)) {
+      if (lmsContext?.error) {
+        const title = lmsContext.timeout ? 'Moodle sedang lambat' : 'Data Moodle belum bisa dimuat';
+        const subtitle = lmsContext.timeout
+          ? 'Request ke Moodle melewati batas waktu. Ini biasanya bukan karena jawaban kamu salah. Coba klik ulang menu/pertanyaan yang tadi. Jika masih timeout sampai 3 kali, coba menu lain dulu atau ulangi beberapa menit lagi.'
+          : 'Sistem belum bisa membaca data Moodle saat ini. Coba klik ulang menu/pertanyaan yang tadi, atau cek kembali beberapa saat lagi.';
+        text = emptyStateHtml({ title, subtitle });
+        return { text, actions, strict: true, allowAiFallback: false };
+      }
+
       if (!lmsContext || !lmsContext.course?.course_name) {
         if (lmsContext && lmsContext.hasConfig) {
           text = emptyStateHtml({ title: 'Kelas atau course belum terdeteksi', subtitle: 'Buka AI dari halaman course VClass atau verifikasi email siswa terlebih dahulu supaya sistem tahu course yang kamu ikuti.' });
@@ -628,7 +659,9 @@ const systemResponseService = {
       if (retrievalResults?.length > 0) {
         text = `AI ${reason}. Berikut referensi dari database yang mungkin membantu:\n\n`;
         retrievalResults.slice(0, 3).forEach((r) => { text += `[ACCORDION=${r.title || 'Materi / FAQ'}]\n${r.content}\n[/ACCORDION]\n`; });
-      } else text = `AI ${reason}. Maaf, saat ini aku belum bisa memberikan jawaban panjang. Coba lagi dalam beberapa saat ya!`;
+      } else text = `AI ${reason}. Maaf, saat ini aku belum bisa memberikan jawaban panjang. Coba lagi dalam beberapa saat ya!
+
+Kalau ini muncul setelah loading lama, kamu bisa klik ulang menu/pertanyaan yang tadi. Jika masih gagal beberapa kali, coba tanya menu lain dulu karena kemungkinan Moodle/server sedang lambat.`;
       return { text, actions, strict: true, allowAiFallback: false };
     }
 

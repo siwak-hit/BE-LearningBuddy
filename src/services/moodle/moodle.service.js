@@ -1,17 +1,30 @@
 const moodleConfigModel = require('../../models/moodleConfig.model');
 
 const MOODLE_REQUEST_TIMEOUT_MS = parseInt(process.env.MOODLE_REQUEST_TIMEOUT_MS || '18000', 10);
-const MOODLE_CONFIG_CACHE_TTL_MS = parseInt(process.env.MOODLE_CONFIG_CACHE_TTL_MS || '300000', 10);
-const moodleConfigCache = new Map();
+const MOODLE_RESOLVE_CACHE_TTL_MS = parseInt(process.env.MOODLE_RESOLVE_CACHE_TTL_MS || '600000', 10);
+const MOODLE_RESOLVE_CONCURRENCY = Math.max(1, parseInt(process.env.MOODLE_RESOLVE_CONCURRENCY || '3', 10));
+const studentResolveCache = new Map();
 
-function readConfigCache(projectId) {
-  const hit = moodleConfigCache.get(projectId);
+function readStudentResolveCache(key) {
+  const hit = studentResolveCache.get(key);
   if (!hit) return null;
-  if (Date.now() - hit.cachedAt > MOODLE_CONFIG_CACHE_TTL_MS) { moodleConfigCache.delete(projectId); return null; }
-  return hit.config;
+  if (Date.now() - hit.createdAt > MOODLE_RESOLVE_CACHE_TTL_MS) {
+    studentResolveCache.delete(key);
+    return null;
+  }
+  return JSON.parse(JSON.stringify(hit.value));
 }
-function writeConfigCache(projectId, config) { if (projectId && config) moodleConfigCache.set(projectId, { config, cachedAt: Date.now() }); }
-function clearConfigCache(projectId = '') { if (projectId) moodleConfigCache.delete(projectId); else moodleConfigCache.clear(); }
+
+function writeStudentResolveCache(key, value) {
+  if (!key || !value) return;
+  studentResolveCache.set(key, { createdAt: Date.now(), value: JSON.parse(JSON.stringify(value)) });
+}
+
+function chunkArray(items = [], size = 3) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
 
 
 function normalizeText(value = '') {
@@ -158,20 +171,13 @@ function buildArrayParams(name, values = []) {
 }
 
 const moodleService = {
-  async getConfig(projectId, options = {}) {
-    if (!options.forceRefresh) {
-      const cached = readConfigCache(projectId);
-      if (cached) return cached;
-    }
+  async getConfig(projectId) {
     const config = await moodleConfigModel.findByProjectId(projectId);
     if (!config || !config.token || !config.rest_endpoint) {
       throw new Error('Konfigurasi Moodle belum diatur atau token tidak ditemukan');
     }
-    writeConfigCache(projectId, config);
     return config;
   },
-
-  clearConfigCache,
 
   buildRestUrl(endpoint, token, wsfunction, params = {}) {
     const url = new URL(endpoint);
@@ -187,16 +193,19 @@ const moodleService = {
     return url.toString();
   },
 
-  async callDirect(endpoint, token, wsfunction, params = {}, options = {}) {
+  async callDirect(endpoint, token, wsfunction, params = {}) {
     const url = moodleService.buildRestUrl(endpoint, token, wsfunction, params);
-    const timeoutMs = Number(options.timeoutMs || MOODLE_REQUEST_TIMEOUT_MS);
+    const timeoutMs = Number(process.env.MOODLE_REQUEST_TIMEOUT_MS || MOODLE_REQUEST_TIMEOUT_MS || 18000);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     let response;
     try {
       response = await fetch(url, { method: 'POST', signal: controller.signal });
     } catch (error) {
-      if (error?.name === 'AbortError') throw new Error(`Moodle request timeout setelah ${Math.round(timeoutMs / 1000)} detik`);
+      if (error?.name === 'AbortError') {
+        throw new Error(`Moodle timeout setelah ${Math.round(timeoutMs / 1000)} detik (${wsfunction}).`);
+      }
       throw error;
     } finally {
       clearTimeout(timeoutId);
@@ -211,9 +220,9 @@ const moodleService = {
     return data;
   },
 
-  async callByProjectId(projectId, wsfunction, params = {}, options = {}) {
+  async callByProjectId(projectId, wsfunction, params = {}) {
     const config = await moodleService.getConfig(projectId);
-    return moodleService.callDirect(config.rest_endpoint, config.token, wsfunction, params, options);
+    return moodleService.callDirect(config.rest_endpoint, config.token, wsfunction, params);
   },
 
   async testConnection(endpoint, token) {
@@ -302,10 +311,14 @@ const moodleService = {
       throw new Error('Email siswa tidak valid.');
     }
 
-    const config = await moodleService.getConfig(projectId);
-    const courseMap = config.course_map || {};
     const requestedClassCode = normalizeClassCode(options.classCode || options.class_code || '');
     const requestedCourseId = Number(options.courseId || options.course_id || 0) || null;
+    const cacheKey = [projectId, targetEmail, requestedClassCode || '-', requestedCourseId || '-'].join(':');
+    const cached = readStudentResolveCache(cacheKey);
+    if (cached) return { ...cached, cache_hit: true };
+
+    const config = await moodleService.getConfig(projectId);
+    const courseMap = config.course_map || {};
 
     let classEntries = Object.entries(courseMap)
       .map(([classCode, courseId]) => ({ classCode: normalizeClassCode(classCode), courseId: Number(courseId) }))
@@ -317,12 +330,14 @@ const moodleService = {
     } else if (requestedClassCode) {
       const mappedCourseId = Number(courseMap[requestedClassCode] || 0);
       if (!mappedCourseId) {
-        return {
+        const result = {
           found: false,
           email: targetEmail,
           class_code: requestedClassCode,
           message: `Kelas ${requestedClassCode} belum ada di mapping Moodle. Sinkronisasi course dari dashboard terlebih dahulu.`
         };
+        writeStudentResolveCache(cacheKey, result);
+        return result;
       }
       classEntries = [{ classCode: requestedClassCode, courseId: mappedCourseId }];
     }
@@ -331,48 +346,80 @@ const moodleService = {
       throw new Error('course_map Moodle masih kosong. Klik Sinkronisasi Course dari dashboard terlebih dahulu.');
     }
 
-    const matchedCourses = [];
+    function buildMatchedCoursesFromUser(found, fallbackEntry) {
+      const enrolledCourses = Array.isArray(found.enrolledcourses) ? found.enrolledcourses : [];
+      const mapEntries = Object.entries(courseMap)
+        .map(([classCode, courseId]) => ({ classCode: normalizeClassCode(classCode), courseId: Number(courseId) }))
+        .filter((item) => item.classCode && item.courseId);
+      const byCourseId = new Map(mapEntries.map((item) => [String(item.courseId), item.classCode]));
+      const result = [];
+      const seen = new Set();
+
+      enrolledCourses.forEach((course) => {
+        const courseId = Number(course.id || course.courseid || 0);
+        if (!courseId || !byCourseId.has(String(courseId)) || seen.has(String(courseId))) return;
+        seen.add(String(courseId));
+        result.push({
+          class_code: byCourseId.get(String(courseId)),
+          course_id: courseId,
+          course_title: course.fullname || course.displayname || course.shortname || `Course ${courseId}`,
+          course_url: `${getMoodleBaseUrl(config.rest_endpoint)}/course/view.php?id=${courseId}`,
+          roles: (found.roles || []).map((role) => role.shortname || role.name).filter(Boolean)
+        });
+      });
+
+      if (!result.length && fallbackEntry) {
+        const enrolledCourse = enrolledCourses.find((course) => String(course.id) === String(fallbackEntry.courseId));
+        result.push({
+          class_code: fallbackEntry.classCode,
+          course_id: fallbackEntry.courseId,
+          course_title: enrolledCourse?.fullname || enrolledCourse?.displayname || enrolledCourse?.shortname || `Course ${fallbackEntry.courseId}`,
+          course_url: `${getMoodleBaseUrl(config.rest_endpoint)}/course/view.php?id=${fallbackEntry.courseId}`,
+          roles: (found.roles || []).map((role) => role.shortname || role.name).filter(Boolean)
+        });
+      }
+
+      return requestedClassCode || requestedCourseId
+        ? result.filter((course) => {
+            if (requestedCourseId) return String(course.course_id) === String(requestedCourseId);
+            return normalizeClassCode(course.class_code) === requestedClassCode;
+          })
+        : result;
+    }
+
+    async function checkCourse(courseEntry) {
+      const users = await moodleService.getEnrolledUsers(projectId, courseEntry.courseId);
+      const found = (Array.isArray(users) ? users : []).find((user) => {
+        const userEmail = String(user.email || '').trim().toLowerCase();
+        const username = String(user.username || '').trim().toLowerCase();
+        return userEmail === targetEmail || username === targetEmail;
+      });
+
+      if (!found) return null;
+      return { user: found, courses: buildMatchedCoursesFromUser(found, courseEntry) };
+    }
+
     let matchedUser = null;
+    let matchedCourses = [];
 
-    for (const courseEntry of classEntries) {
-      try {
-        const users = await moodleService.getEnrolledUsers(projectId, courseEntry.courseId);
-        const found = (Array.isArray(users) ? users : []).find((user) => {
-          const userEmail = String(user.email || '').trim().toLowerCase();
-          const username = String(user.username || '').trim().toLowerCase();
-          return userEmail === targetEmail || username === targetEmail;
-        });
+    // Cek beberapa course secara paralel per batch supaya tidak menunggu 8 kelas satu per satu.
+    // Begitu user ditemukan, gunakan daftar enrolledcourses dari Moodle untuk membentuk daftar kelas.
+    for (const group of chunkArray(classEntries, MOODLE_RESOLVE_CONCURRENCY)) {
+      const results = await Promise.allSettled(group.map(checkCourse));
+      const hit = results.find((result) => result.status === 'fulfilled' && result.value?.user)?.value;
+      results
+        .filter((result) => result.status === 'rejected')
+        .forEach((result) => console.warn('[Moodle Service] Gagal cek enrolled user:', result.reason?.message || result.reason));
 
-        if (!found) continue;
-
-        matchedUser = found;
-
-        const enrolledCourse = (found.enrolledcourses || []).find((course) => String(course.id) === String(courseEntry.courseId));
-        const roles = (found.roles || []).map((role) => role.shortname || role.name).filter(Boolean);
-        const courseTitle = enrolledCourse?.fullname || enrolledCourse?.displayname || enrolledCourse?.shortname || `Course ${courseEntry.courseId}`;
-
-        matchedCourses.push({
-          class_code: courseEntry.classCode,
-          course_id: courseEntry.courseId,
-          course_title: courseTitle,
-          course_url: `${getMoodleBaseUrl(config.rest_endpoint)}/course/view.php?id=${courseEntry.courseId}`,
-          roles
-        });
-
-        // Kalau kelas/course sudah spesifik, tidak perlu cek course lain.
-        if (requestedClassCode || requestedCourseId) break;
-      } catch (error) {
-        console.warn('[Moodle Service] Gagal cek enrolled user:', {
-          projectId,
-          classCode: courseEntry.classCode,
-          courseId: courseEntry.courseId,
-          message: error.message
-        });
+      if (hit) {
+        matchedUser = hit.user;
+        matchedCourses = hit.courses || [];
+        break;
       }
     }
 
     if (!matchedUser) {
-      return {
+      const result = {
         found: false,
         email: targetEmail,
         class_code: requestedClassCode || null,
@@ -381,11 +428,13 @@ const moodleService = {
           ? `Email ini tidak ditemukan sebagai peserta kelas ${requestedClassCode}. Periksa email atau kelas yang dipilih.`
           : 'Email ini tidak ditemukan pada daftar peserta course Moodle yang terdaftar di project ini.'
       };
+      writeStudentResolveCache(cacheKey, result);
+      return result;
     }
 
     const primaryCourse = matchedCourses[0] || null;
 
-    return {
+    const result = {
       found: true,
       moodle_user_id: matchedUser.id,
       username: matchedUser.username || null,
@@ -395,10 +444,12 @@ const moodleService = {
       course_id: primaryCourse?.course_id || requestedCourseId || null,
       course_title: primaryCourse?.course_title || null,
       enrolled_courses: matchedCourses,
-      source: requestedClassCode || requestedCourseId ? 'moodle_enrolled_users_scoped' : 'moodle_enrolled_users'
+      source: requestedClassCode || requestedCourseId ? 'moodle_enrolled_users_scoped_cached' : 'moodle_enrolled_users_cached'
     };
-  }
 
+    writeStudentResolveCache(cacheKey, result);
+    return result;
+  }
 };
 
 module.exports = moodleService;

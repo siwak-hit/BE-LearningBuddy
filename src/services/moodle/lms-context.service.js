@@ -217,6 +217,68 @@ function isCompletionStatusComplete(status = {}) {
   return status.isoverallcomplete === true || [1, 2, 3].includes(state);
 }
 
+
+function shouldInspectUserSubmission(intent = '', activity = {}) {
+  const type = normalizeActivityTypeLocal(activity.type || activity.moodle_activity_type || activity.activity_type);
+  const value = String(intent || '');
+  if (type === 'quiz') return !value || value.includes('quiz') || value.includes('kuis') || value.includes('tugas') || value.includes('aktivitas');
+  if (type === 'assign') return !value || value.includes('tugas') || value.includes('assignment') || value.includes('aktivitas');
+  return false;
+}
+
+function isSubmittedOrFinishedStatus(activity = {}) {
+  const status = String(activity.status || '').toLowerCase();
+  return activity.is_submitted === true
+    || status.includes('sudah mengerjakan')
+    || status.includes('sudah dikumpulkan')
+    || status.includes('terkumpul')
+    || status.includes('submitted')
+    || status.includes('finished');
+}
+
+function getLatestQuizAttempt(attempts = []) {
+  const list = Array.isArray(attempts) ? attempts : [];
+  if (!list.length) return null;
+  return list.slice().sort((a, b) => Number(b.timemodified || b.timefinish || b.timestart || 0) - Number(a.timemodified || a.timefinish || a.timestart || 0))[0];
+}
+
+function quizAttemptIsFinished(attempt = {}) {
+  const state = String(attempt.state || '').toLowerCase();
+  return state === 'finished' || state === 'submitted' || Number(attempt.timefinish || 0) > 0;
+}
+
+function quizAttemptHasGrade(attempt = {}) {
+  return attempt.sumgrades !== null && attempt.sumgrades !== undefined && attempt.sumgrades !== '';
+}
+
+function normalizeAssignmentSubmissionStatus(data = {}) {
+  const lastAttempt = data.lastattempt || data.lastAttempt || {};
+  const submission = lastAttempt.submission || data.submission || {};
+  const status = String(submission.status || lastAttempt.submissionstatus || data.status || '').toLowerCase();
+  const gradingStatus = String(lastAttempt.gradingstatus || data.gradingstatus || data.grading_status || '').toLowerCase();
+  const hasGrade = Boolean(data.feedback?.grade || data.grade || lastAttempt.grade || gradingStatus === 'graded');
+
+  if (status === 'submitted') {
+    return {
+      submitted: true,
+      graded: hasGrade,
+      status: hasGrade ? 'Sudah dikumpulkan' : 'Sudah dikumpulkan, belum dinilai',
+      source: 'moodle_assignment_submission'
+    };
+  }
+
+  if (status === 'draft') {
+    return {
+      submitted: false,
+      graded: false,
+      status: 'Draft tersimpan, belum dikirim',
+      source: 'moodle_assignment_submission'
+    };
+  }
+
+  return null;
+}
+
 function isActivityLockedForStudent(activity = {}, statusMap = new Map()) {
   if (activity.is_visible === false) return true;
   if (activity.base_available === false) return true;
@@ -657,7 +719,90 @@ const lmsContextService = {
     return { classCode: resolvedClassCode, courseId: resolvedCourseId, course, activities: withCourseMeta, deadlines: deadlineMeta, source };
   },
 
-  async applyCompletionStatuses(projectId, courseId, moodleUserId, activities = []) {
+  async enrichUserAttemptAndSubmissionStatuses(projectId, moodleUserId, activities = [], options = {}) {
+    const intent = options.intent || '';
+    if (!projectId || !moodleUserId || !activities.length) return activities;
+
+    const targets = activities
+      .filter((activity) => shouldInspectUserSubmission(intent, activity))
+      .filter((activity) => activity.instance_id)
+      .slice(0, 8);
+
+    if (!targets.length) return activities;
+
+    const byKey = new Map();
+
+    await Promise.allSettled(targets.map(async (activity) => {
+      const type = normalizeActivityTypeLocal(activity.type || activity.moodle_activity_type || activity.activity_type);
+      const key = `${activity.course_id || ''}:${activity.module_id || ''}:${activity.instance_id || ''}:${activity.title || ''}`;
+
+      if (type === 'quiz') {
+        const data = await moodleService.getUserQuizAttempts(projectId, activity.instance_id, moodleUserId);
+        const attempts = Array.isArray(data?.attempts) ? data.attempts : [];
+        const latest = getLatestQuizAttempt(attempts);
+        if (!latest) return;
+
+        if (quizAttemptIsFinished(latest)) {
+          const graded = quizAttemptHasGrade(latest);
+          byKey.set(key, {
+            status: graded ? 'Sudah mengerjakan' : 'Sudah mengerjakan, belum dinilai',
+            is_completed: true,
+            is_submitted: true,
+            submitted_not_graded: !graded,
+            is_available: activity.base_available !== false,
+            action_url: activity.url || activity.activity_url || activity.action_url,
+            latest_attempt_state: latest.state || null,
+            attempt_count: attempts.length,
+            progress_source: 'moodle_quiz_attempts'
+          });
+        } else if (String(latest.state || '').toLowerCase() === 'inprogress') {
+          byKey.set(key, {
+            status: 'Sedang dikerjakan, belum dikirim',
+            is_completed: false,
+            is_submitted: false,
+            is_available: activity.base_available !== false,
+            latest_attempt_state: latest.state || null,
+            attempt_count: attempts.length,
+            progress_source: 'moodle_quiz_attempts'
+          });
+        }
+      }
+
+      if (type === 'assign') {
+        const data = await moodleService.getAssignmentSubmissionStatus(projectId, activity.instance_id, moodleUserId);
+        const normalized = normalizeAssignmentSubmissionStatus(data || {});
+        if (!normalized) return;
+
+        byKey.set(key, {
+          status: normalized.status,
+          is_completed: normalized.submitted,
+          is_submitted: normalized.submitted,
+          submitted_not_graded: normalized.submitted && !normalized.graded,
+          is_available: activity.base_available !== false,
+          action_url: activity.url || activity.activity_url || activity.action_url,
+          progress_source: normalized.source
+        });
+      }
+    }));
+
+    if (!byKey.size) return activities;
+
+    return activities.map((activity) => {
+      const key = `${activity.course_id || ''}:${activity.module_id || ''}:${activity.instance_id || ''}:${activity.title || ''}`;
+      const extra = byKey.get(key);
+      if (!extra) return activity;
+      return {
+        ...activity,
+        ...extra,
+        // Jika sudah submit/finish, jangan pakai availability text lama sebagai status final.
+        availability_info: extra.is_submitted ? '' : activity.availability_info,
+        is_available: extra.is_submitted ? true : extra.is_available,
+        action_url: extra.action_url || activity.action_url || activity.url || activity.activity_url
+      };
+    });
+  },
+
+  async applyCompletionStatuses(projectId, courseId, moodleUserId, activities = [], options = {}) {
     if (!projectId || !courseId || !moodleUserId || !activities.length) {
       return { activities, progressAvailable: false };
     }
@@ -667,7 +812,7 @@ const lmsContextService = {
       const statuses = Array.isArray(data?.statuses) ? data.statuses : [];
       const statusMap = new Map(statuses.map((status) => [Number(status.cmid), status]));
 
-      const mapped = activities.map((activity) => {
+      let mapped = activities.map((activity) => {
         const status = statusMap.get(Number(activity.module_id));
         if (!status) return activity;
         const completed = isCompletionStatusComplete(status);
@@ -686,10 +831,12 @@ const lmsContextService = {
         };
       });
 
-      return { activities: mapped, progressAvailable: statuses.length > 0 };
+      mapped = await this.enrichUserAttemptAndSubmissionStatuses(projectId, moodleUserId, mapped, options);
+      return { activities: mapped, progressAvailable: statuses.length > 0 || mapped.some((activity) => isSubmittedOrFinishedStatus(activity) || String(activity.progress_source || '').includes('moodle_quiz_attempts') || String(activity.progress_source || '').includes('moodle_assignment_submission')) };
     } catch (error) {
       console.warn('[LMS Context] Gagal mengambil completion siswa:', { courseId, moodleUserId, message: error.message });
-      return { activities, progressAvailable: false };
+      const enriched = await this.enrichUserAttemptAndSubmissionStatuses(projectId, moodleUserId, activities, options).catch(() => activities);
+      return { activities: enriched, progressAvailable: enriched.some((activity) => isSubmittedOrFinishedStatus(activity) || String(activity.progress_source || '').includes('moodle_quiz_attempts') || String(activity.progress_source || '').includes('moodle_assignment_submission')) };
     }
   },
 
@@ -741,7 +888,7 @@ const lmsContextService = {
       const context = await this.buildSingleCourseContext(projectId, config, identity.classCode, identity.courseId, { intent });
       if (!context) continue;
 
-      const completion = await this.applyCompletionStatuses(projectId, context.course?.course_id || identity.courseId, moodleUserId, context.activities);
+      const completion = await this.applyCompletionStatuses(projectId, context.course?.course_id || identity.courseId, moodleUserId, context.activities, { intent });
       context.activities = completion.activities;
       progressAvailable = progressAvailable || completion.progressAvailable;
       sourceSet.add(context.source);

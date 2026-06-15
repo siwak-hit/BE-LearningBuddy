@@ -48,6 +48,37 @@ const externalLoaderService = {
     return text.toLowerCase().slice(-4) === '/api' ? text.slice(0, -4) : text;
   }
 
+
+  var ALB_REQUEST_TIMEOUT_MS = 20000;
+
+  function fetchWithTimeout(url, options, timeoutMs, label) {
+    var ms = Number(timeoutMs || ALB_REQUEST_TIMEOUT_MS || 20000);
+    var fetchOptions = options || {};
+
+    if (!window.AbortController) {
+      return fetch(url, fetchOptions);
+    }
+
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function() {
+      try { controller.abort(); } catch (e) {}
+    }, ms);
+
+    var mergedOptions = {};
+    Object.keys(fetchOptions).forEach(function(key) { mergedOptions[key] = fetchOptions[key]; });
+    mergedOptions.signal = fetchOptions.signal || controller.signal;
+
+    return fetch(url, mergedOptions).finally(function() {
+      clearTimeout(timeoutId);
+    }).catch(function(error) {
+      if (error && error.name === 'AbortError') {
+        error.albTimeout = true;
+        error.message = (label || 'Request') + ' terlalu lama. Batas ' + Math.round(ms / 1000) + ' detik.';
+      }
+      throw error;
+    });
+  }
+
   var apiBase = cleanApiBase(currentScript.dataset.apiBase) || cleanApiBase(scriptUrl.origin) || '${escapeJsString(fallbackApiBase)}';
   var appUrl = cleanUrl(currentScript.dataset.appUrl) || '${escapeJsString(fallbackAppUrl)}';
   var projectKey = currentScript.dataset.projectKey || scriptUrl.searchParams.get('projectKey');
@@ -360,6 +391,7 @@ const externalLoaderService = {
 
       var resolvedIdentity = null;
       var selectedCourse = null;
+      var emailCheckTimeoutCount = 0;
 
       function escapeHtmlInline(value) {
         return String(value || '')
@@ -446,14 +478,14 @@ const externalLoaderService = {
         setClassEnabled(false);
         renderClassOptions([]);
 
-        fetch(apiBase + '/api/moodle/student/resolve', {
+        fetchWithTimeout(apiBase + '/api/moodle/student/resolve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             projectKey: projectKey,
             email: email
           })
-        })
+        }, ALB_REQUEST_TIMEOUT_MS, 'Cek email Moodle')
         .then(function(res) { return res.json(); })
         .then(function(res) {
           if (!res || res.status !== 'success' || !res.data || !res.data.found) {
@@ -462,6 +494,7 @@ const externalLoaderService = {
             return;
           }
 
+          emailCheckTimeoutCount = 0;
           resolvedIdentity = res.data;
           var courses = res.data.enrolled_courses || [];
 
@@ -477,7 +510,15 @@ const externalLoaderService = {
         .catch(function(err) {
           console.error('[AI Buddy] Gagal cek email Moodle:', err);
           resolvedIdentity = null;
-          setMiniStatus('Gagal mengecek email. Pastikan koneksi Moodle dan API aktif.', 'error');
+          if (err && (err.albTimeout || err.name === 'AbortError')) {
+            emailCheckTimeoutCount += 1;
+            var retryText = emailCheckTimeoutCount >= 3
+              ? 'Sudah 3 kali timeout. Kemungkinan Moodle/server sedang lambat. Coba tanya menu lain dulu atau ulangi beberapa menit lagi.'
+              : 'Coba klik tombol Cek Email sekali lagi. Kalau masih lama, tunggu sebentar lalu ulangi.';
+            setMiniStatus('Cek email ke Moodle terlalu lama, bukan karena email kamu salah. ' + retryText, 'warning');
+          } else {
+            setMiniStatus('Gagal mengecek email. Pastikan koneksi Moodle dan API aktif. Coba klik Cek Email lagi.', 'error');
+          }
         })
         .finally(function() {
           if (checkBtn) {
@@ -625,11 +666,11 @@ const externalLoaderService = {
           moodleContext: sessionMeta
         };
 
-        fetch(apiBase + '/api/chat/session', {
+        fetchWithTimeout(apiBase + '/api/chat/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        })
+        }, ALB_REQUEST_TIMEOUT_MS, 'Mulai sesi AI Buddy')
         .then(function(res) {
           if (!res.ok) throw new Error('Gagal membuat sesi external.');
           return res.json();
@@ -645,7 +686,7 @@ const externalLoaderService = {
         })
         .catch(function(err) {
           console.error('[AI Buddy] Error:', err);
-          setMiniStatus('Gagal menghubungkan ke AI Buddy. Coba lagi.', 'error');
+          setMiniStatus((err && (err.albTimeout || err.name === 'AbortError')) ? 'Membuka sesi terlalu lama. Coba klik Mulai Sesi lagi. Jika masih timeout 3 kali, kemungkinan Moodle/server sedang lambat.' : 'Gagal menghubungkan ke AI Buddy. Coba lagi.', (err && (err.albTimeout || err.name === 'AbortError')) ? 'warning' : 'error');
           btnSubmit.innerHTML = 'Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i>';
           btnSubmit.disabled = false;
           btnSubmit.style.opacity = '1';
@@ -674,7 +715,7 @@ const externalLoaderService = {
       }
 
       if ((ctx.email || ctx.moodle_user_id) && ctx.course_id) {
-        fetch(apiBase + '/api/chat/session', {
+        fetchWithTimeout(apiBase + '/api/chat/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -688,7 +729,7 @@ const externalLoaderService = {
             },
             moodleContext: ctx
           })
-        })
+        }, ALB_REQUEST_TIMEOUT_MS, 'Auto sesi AI Buddy')
         .then(function(r) { return r.json(); })
         .then(function(res) {
           btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
@@ -717,7 +758,7 @@ const externalLoaderService = {
     document.body.appendChild(btn);
   }
 
-  fetch(apiBase + '/api/widget/config/' + encodeURIComponent(projectKey) + '?t=' + Date.now(), { cache: 'no-store' })
+  fetchWithTimeout(apiBase + '/api/widget/config/' + encodeURIComponent(projectKey) + '?t=' + Date.now(), { cache: 'no-store' }, ALB_REQUEST_TIMEOUT_MS, 'Load konfigurasi widget')
     .then(function(r) {
       if (!r.ok) throw new Error('Gagal mengambil config widget. HTTP ' + r.status);
       return r.json();
