@@ -1,68 +1,54 @@
 function cleanUrl(value = '') {
   const text = String(value || '').trim();
 
-  if (
-    !text ||
-    text === 'undefined' ||
-    text === 'null' ||
-    text === '#'
-  ) {
+  if (!text || text === 'undefined' || text === 'null' || text === '#') {
     return '';
   }
 
   return text.replace(/\/$/, '');
 }
 
+function cleanApiBase(value = '') {
+  return cleanUrl(value).replace(/\/api\/?$/, '');
+}
+
+function escapeJsString(value = '') {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 const externalLoaderService = {
   generate() {
-    const defaultApiBase = cleanUrl(
+    const fallbackApiBase = cleanApiBase(
       process.env.BACKEND_API_BASE_URL ||
       process.env.API_BASE_URL ||
-      process.env.APP_API_URL ||
+      process.env.APP_URL ||
       'https://be-learning-buddy.vercel.app'
     );
 
-    const defaultAppUrl = cleanUrl(
+    const fallbackAppUrl = cleanUrl(
       process.env.FRONTEND_APP_URL ||
-      process.env.APP_URL ||
+      process.env.PUBLIC_APP_URL ||
+      process.env.PUBLIC_FRONTEND_APP_URL ||
       'https://fe-learning-buddy.vercel.app'
     );
 
     return `
 (function () {
+  var currentScript = document.currentScript;
+  var scriptUrl = new URL(currentScript.src);
+
   function cleanUrl(value) {
     var text = String(value || '').trim();
-
-    if (
-      !text ||
-      text === 'undefined' ||
-      text === 'null' ||
-      text === '#'
-    ) {
-      return '';
-    }
-
+    if (!text || text === 'undefined' || text === 'null' || text === '#') return '';
     return text.replace(/\/$/, '');
   }
 
-  var currentScript = document.currentScript;
-
-  if (!currentScript) {
-    console.error('[AI Learning Buddy] currentScript tidak ditemukan');
-    return;
+  function cleanApiBase(value) {
+    return cleanUrl(value).replace(/\/api\/?$/, '');
   }
 
-  var scriptUrl = new URL(currentScript.src, window.location.href);
-
-  var apiBase =
-    cleanUrl(currentScript.dataset.apiBase) ||
-    cleanUrl(scriptUrl.origin) ||
-    ${JSON.stringify(defaultApiBase)};
-
-  var appUrl =
-    cleanUrl(currentScript.dataset.appUrl) ||
-    ${JSON.stringify(defaultAppUrl)};
-
+  var apiBase = cleanApiBase(currentScript.dataset.apiBase) || cleanApiBase(scriptUrl.origin) || '${escapeJsString(fallbackApiBase)}';
+  var appUrl = cleanUrl(currentScript.dataset.appUrl) || '${escapeJsString(fallbackAppUrl)}';
   var projectKey = currentScript.dataset.projectKey || scriptUrl.searchParams.get('projectKey');
 
   if (!projectKey) {
