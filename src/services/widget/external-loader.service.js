@@ -40,11 +40,12 @@ const externalLoaderService = {
   function cleanUrl(value) {
     var text = String(value || '').trim();
     if (!text || text === 'undefined' || text === 'null' || text === '#') return '';
-    return text.replace(/\/$/, '');
+    return text.charAt(text.length - 1) === '/' ? text.slice(0, -1) : text;
   }
 
   function cleanApiBase(value) {
-    return cleanUrl(value).replace(/\/api\/?$/, '');
+    var text = cleanUrl(value);
+    return text.toLowerCase().slice(-4) === '/api' ? text.slice(0, -4) : text;
   }
 
   var apiBase = cleanApiBase(currentScript.dataset.apiBase) || cleanApiBase(scriptUrl.origin) || '${escapeJsString(fallbackApiBase)}';
