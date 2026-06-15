@@ -16,7 +16,19 @@ function parseAllowedOrigins(value) {
     .filter(Boolean);
 }
 
-const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGIN);
+const allowedOrigins = parseAllowedOrigins(
+  env.ALLOWED_ORIGIN ||
+  process.env.ALLOWED_ORIGIN ||
+  process.env.CORS_ORIGIN
+);
+
+function isAllowedVercelPreview(origin) {
+  return /^https:\/\/fe-learning-buddy-[a-z0-9-]+-siwak-hits-projects\.vercel\.app$/.test(origin);
+}
+
+function isAllowedProduction(origin) {
+  return origin === 'https://fe-learning-buddy.vercel.app';
+}
 
 const corsConfig = cors({
   origin(origin, callback) {
@@ -27,7 +39,12 @@ const corsConfig = cors({
 
     const cleanOrigin = normalizeOrigin(origin);
 
-    if (allowedOrigins.includes(cleanOrigin)) {
+    const isAllowed =
+      allowedOrigins.includes(cleanOrigin) ||
+      isAllowedProduction(cleanOrigin) ||
+      isAllowedVercelPreview(cleanOrigin);
+
+    if (isAllowed) {
       return callback(null, true);
     }
 
@@ -36,7 +53,7 @@ const corsConfig = cors({
       allowedOrigins
     });
 
-    return callback(new Error(`Origin tidak diizinkan: ${cleanOrigin}`));
+    return callback(new Error(`Origin tidak diizinkan: ${cleanOrigin}`), false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
