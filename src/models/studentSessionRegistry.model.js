@@ -13,7 +13,7 @@ const studentSessionRegistryModel = {
     if (!projectId || !email || !classCode) return null;
     const { data, error } = await getClient()
       .from(TABLE)
-      .select('*')
+      .select('id, session_id, project_id, student_email, class_code, student_name, moodle_user_id, course_id, course_title, updated_at, created_at, is_deleted')
       .eq('project_id', projectId)
       .eq('student_email', cleanEmail(email))
       .eq('class_code', cleanClass(classCode))

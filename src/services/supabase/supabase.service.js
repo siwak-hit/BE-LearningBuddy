@@ -103,12 +103,14 @@ const supabaseService = {
     return data;
   },
 
-  async findMany(table, conditions = {}) {
-    const { data, error } = await supabaseAdmin
-      .from(table)
-      .select('*')
-      .match(conditions);
+  async findMany(table, conditions = {}, options = {}) {
+    // [v0.4.0] Dukung pemilihan kolom + urutan agar query tidak selalu SELECT *.
+    const { select = '*', orderBy, ascending = true, limit } = options;
+    let query = supabaseAdmin.from(table).select(select).match(conditions);
+    if (orderBy) query = query.order(orderBy, { ascending });
+    if (limit) query = query.limit(limit);
 
+    const { data, error } = await query;
     if (error) throw error;
     return data;
   },

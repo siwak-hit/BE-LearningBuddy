@@ -2,6 +2,17 @@ const studentSessionRegistryModel = require('../models/studentSessionRegistry.mo
 const chatModel = require('../models/chat.model');
 const response = require('../utils/response');
 
+// Reuse hanya untuk sesi pada hari kalender yang sama (Asia/Jakarta) — "sebelum jam 12 malam".
+function isSameJakartaDay(ts) {
+  if (!ts) return false;
+  try {
+    const fmt = (d) => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+    return fmt(ts) === fmt(new Date());
+  } catch (_) {
+    return false;
+  }
+}
+
 async function resolveProjectId({ projectId, projectKey }) {
   if (projectId) return projectId;
   if (projectKey && chatModel.getProjectIdByKey) return chatModel.getProjectIdByKey(projectKey);
@@ -16,7 +27,8 @@ const studentSessionController = {
       if (!projectId) return response.error(res, 'projectId/projectKey diperlukan', null, 400);
       if (!email || !(classCode || class_code)) return response.error(res, 'email dan classCode diperlukan', null, 400);
       const data = await studentSessionRegistryModel.findActive(projectId, email, classCode || class_code);
-      return response.success(res, data ? 'Session lama ditemukan' : 'Session lama tidak ditemukan', { found: Boolean(data), session: data });
+      const valid = data && isSameJakartaDay(data.updated_at);
+      return response.success(res, valid ? 'Session lama ditemukan' : 'Session lama tidak ditemukan', { found: Boolean(valid), session: valid ? data : null });
     } catch (error) {
       return response.error(res, 'Gagal mencari session siswa', error.message, 500);
     }

@@ -52,7 +52,7 @@ const aiResponseCacheModel = {
     const now = new Date().toISOString();
     const { data, error } = await getClient()
       .from(TABLE)
-      .select('*')
+      .select('id, answer, intent, context_hash, hit_count, expires_at, updated_at')
       .eq('project_id', projectId)
       .eq('cache_key', cacheKey)
       .or(`expires_at.is.null,expires_at.gt.${now}`)
@@ -71,7 +71,7 @@ const aiResponseCacheModel = {
     const now = new Date().toISOString();
     let query = getClient()
       .from(TABLE)
-      .select('*')
+      .select('id, answer, question, normalized_question, intent, context_hash, hit_count')
       .eq('project_id', projectId)
       .or(`expires_at.is.null,expires_at.gt.${now}`)
       .order('updated_at', { ascending: false })

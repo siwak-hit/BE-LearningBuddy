@@ -13,6 +13,8 @@ const templateRoutes = require('./template.routes');
 const moodleRoutes = require('./moodle.routes');
 const studentNoteRoutes = require('./studentNote.routes');
 const studentSessionRoutes = require('./studentSession.routes');
+const analyticsRoutes = require('./analytics.routes');
+const { authLimiter } = require('../middlewares/rate-limit.middleware');
 
 const router = express.Router();
 
@@ -23,11 +25,12 @@ router.use('/chat', chatRoutes);
 router.use('/knowledge', knowledgeRoutes);
 router.use('/documents', documentRoutes);
 router.use('/rag', ragRoutes);
-router.post('/auth/login', authController.login);
+router.post('/auth/login', authLimiter, authController.login);
 router.use('/logs', logRoutes);
 router.use('/page-templates', templateRoutes);
 router.use('/moodle', moodleRoutes);
 router.use('/student-notes', studentNoteRoutes);
 router.use('/student-sessions', studentSessionRoutes);
+router.use('/analytics', analyticsRoutes);
 
 module.exports = router;

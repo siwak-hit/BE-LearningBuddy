@@ -1,8 +1,12 @@
 const express = require('express');
 const projectController = require('../controllers/project.controller');
 const asyncHandler = require('../utils/async-handler');
+const { requireAuth } = require('../middlewares/auth.middleware');
 
 const router = express.Router();
+
+// [SECURITY] Semua operasi project hanya untuk admin terautentikasi.
+router.use(requireAuth);
 
 router.post('/', asyncHandler(projectController.create));
 router.get('/', asyncHandler(projectController.findAll));

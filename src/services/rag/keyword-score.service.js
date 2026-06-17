@@ -36,9 +36,16 @@ const keywordScoreService = {
     const { isDefinitional, subject } = this.analyzeDefinitionalQuery(lowerQuery);
     const keywords = this.normalize(subject || lowerQuery);
 
-    // 1. Exact Phrase Match
-    if (content.includes(lowerQuery) && lowerQuery.length > 3) score += 15;
-    if ((title.includes(lowerQuery) || topic.includes(lowerQuery)) && lowerQuery.length > 3) score += 5;
+    // 1. Exact Phrase Match (PERBAIKAN SKOR)
+    // Tingkatkan skor signifikan jika query adalah subjek utama (berada di judul/topik)
+    if (lowerQuery.length > 3) {
+      if (title.includes(lowerQuery) || topic.includes(lowerQuery)) {
+        score += 80; // Boost raksasa agar chunk dengan judul "WordPress" menang telak
+      }
+      if (content.includes(lowerQuery)) {
+        score += 20;
+      }
+    }
 
     // 2. Query Terms Appearance
     let termMatches = 0;
@@ -47,9 +54,9 @@ const keywordScoreService = {
     });
 
     if (termMatches === keywords.length && keywords.length > 0) {
-        score += 10; // Semua term cocok
+        score += 15; // Sedikit dinaikkan
     } else {
-        score += (termMatches * 2); // Hanya sebagian
+        score += (termMatches * 2);
     }
 
     // 3. Heading / Section Match (+10)

@@ -13,6 +13,13 @@ function clean(value = '') {
   return String(value || '').trim();
 }
 
+// [SECURITY] Netralkan karakter struktural PostgREST (`,` `(` `)` `\` `:`) dan
+// wildcard ilike (`%` `_`) agar input pencarian tidak bisa menyuntik filter
+// tambahan ke dalam ekspresi `.or(...)`.
+function sanitizeLikeTerm(value = '') {
+  return clean(value).replace(/[,()\\:%_]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+}
+
 const studentNoteModel = {
   async list({ projectId, sessionId, studentEmail, classCode, q = '', page = 1, limit = 5 }) {
     const safePage = Math.max(1, Number(page || 1));
@@ -32,7 +39,8 @@ const studentNoteModel = {
     else if (sessionId) query = query.eq('session_id', sessionId);
 
     if (classCode) query = query.eq('class_code', clean(classCode).toUpperCase());
-    if (q) query = query.or(`title.ilike.%${q}%,content.ilike.%${q}%`);
+    const safeQ = sanitizeLikeTerm(q);
+    if (safeQ) query = query.or(`title.ilike.%${safeQ}%,content.ilike.%${safeQ}%`);
 
     const { data, error, count } = await query;
     if (error) throw error;

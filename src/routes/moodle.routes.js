@@ -1,21 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const moodleController = require('../controllers/moodle.controller');
+const { requireAuth } = require('../middlewares/auth.middleware');
 
-router.get('/config', moodleController.getConfig);
-router.post('/config', moodleController.saveConfig);
-router.post('/test', moodleController.testConnection);
+// [SECURITY] /student/resolve dipakai siswa (cek email saat masuk workspace) → PUBLIK.
+// Sisanya (config token Moodle, sinkronisasi, preview) hanya untuk admin.
 router.post('/student/resolve', moodleController.resolveStudent);
-router.post('/courses/preview-map', moodleController.previewCourseMap);
-router.post('/courses/sync-map', moodleController.syncCourseMap);
+
+router.get('/config', requireAuth, moodleController.getConfig);
+router.post('/config', requireAuth, moodleController.saveConfig);
+router.post('/test', requireAuth, moodleController.testConnection);
+router.post('/courses/preview-map', requireAuth, moodleController.previewCourseMap);
+router.post('/courses/sync-map', requireAuth, moodleController.syncCourseMap);
 
 // Tambahan Routes Sync
-router.get('/course-contents', moodleController.getCourseContents);
-router.post('/sync/course', moodleController.syncCourse);
-router.post('/sync/all', moodleController.syncAll);
+router.get('/course-contents', requireAuth, moodleController.getCourseContents);
+router.post('/sync/course', requireAuth, moodleController.syncCourse);
+router.post('/sync/all', requireAuth, moodleController.syncAll);
 
-router.get('/preview-materials', moodleController.previewMaterials);
-router.get('/chunks', moodleController.getProjectChunks);
+router.get('/preview-materials', requireAuth, moodleController.previewMaterials);
+router.get('/chunks', requireAuth, moodleController.getProjectChunks);
 
 
 module.exports = router;

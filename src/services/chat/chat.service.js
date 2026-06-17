@@ -14,6 +14,7 @@ const pageTemplateService = require('../template/page-template.service');
 const activityModel = require('../../models/activity.model');
 const lmsRouteModel = require('../../models/lmsRoute.model');
 const aiResponseCacheModel = require('../../models/aiResponseCache.model');
+const chunkModel = require('../../models/chunk.model');
 const aiQueueService = require('../ai/aiQueue.service');
 const lmsContextService = require('../moodle/lms-context.service');
 
@@ -31,7 +32,7 @@ const LMS_INTENTS = [
 ];
 
 const QUICK_VISUAL_GUIDE_INTENTS = [
-  'bantuan_login', 'bantuan_dashboard', 'navigasi_kursus', 'akses_materi',
+  'bantuan_login', 'bantuan_dashboard', 'navigasi_kursus',
   'bantuan_tugas', 'bantuan_kumpul_tugas', 'bantuan_kuis', 'bantuan_quiz',
   'bantuan_forum', 'bantuan_logout', 'bantuan_lihat_nilai', 'tutorial_steps'
 ];
@@ -66,14 +67,97 @@ function normalizeText(value = '') {
     .trim();
 }
 
-function canonicalizeRetrievalQuery(message = '') {
+function isGenericOpenMaterialRequest(message = '') {
+  const text = normalizeText(message);
+  return /\b(buka|lihat|cek|tampilkan|cari)\s+(materi|bahan|sumber)\b/.test(text)
+    && !/\b(tentang|mengenai|soal|bab|cms|wordpress|word press|media sosial|hoax|cyberbullying|plugin|blog|website)\b/.test(text);
+}
+
+function isMaterialLearningQuestion(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+
+  const uiWords = /\b(login|logout|masuk|keluar|password|dashboard|sidebar|tab|tombol|klik|menu|upload|unggah|kumpul|forum|balas|reply|quiz|kuis|nilai|deadline|tugas belum|belum dikerjakan)\b/;
+  const asksHowToUseSystem = /\b(cara|gimana|bagaimana)\b/.test(text) && uiWords.test(text);
+  if (asksHowToUseSystem) return false;
+
+  const materialWords = /\b(materi|pelajaran|soal|cms|content management system|wordpress|word press|media sosial|sosial media|hoax|hoaks|cyberbullying|plugin|website|blog|microblog|social network|dampak|definisi|pengertian|contoh|jenis|manfaat|persen|berapa persen|mengapa|kenapa|apa itu|apakah|jelaskan)\b/;
+  const asksKnowledge = /\b(apa|apakah|jelaskan|pengertian|definisi|contoh|jenis|dampak|manfaat|berapa|mengapa|kenapa|maksud|singkatan|kepanjangan)\b/.test(text);
+
+  return materialWords.test(text) && (asksKnowledge || /\b(cms|wordpress|word press|media sosial|hoax|cyberbullying|plugin|website|blog)\b/.test(text));
+}
+
+function isManualMaterialRequest(message = '') {
+  return isMaterialOpenRequest(message) || isMaterialLearningQuestion(message) || isGenericOpenMaterialRequest(message);
+}
+
+function inferManualSidebarIntent(message = '') {
+  const text = normalizeText(message);
+  if (!text) return '';
+
+  const lmsStatus = inferLmsStatusIntentFromMessage(message);
+  if (lmsStatus) return lmsStatus;
+
+  if (/\b(login|log in|masuk akun|masuk vclass)\b/.test(text) && /\b(cara|gimana|bagaimana|bantuan|tidak bisa|ga bisa|gak bisa|dimana|mana|tombol)\b/.test(text)) return 'bantuan_login';
+  if (/\b(lupa password|lupa sandi|reset password)\b/.test(text)) return 'bantuan_lupa_password';
+  if (/\b(logout|log out|keluar akun|sign out)\b/.test(text)) return 'bantuan_logout';
+  if (/\b(nilai|grade|rapor|laporan nilai)\b/.test(text) && /\b(cara|lihat|cek|buka|dimana|gimana|bagaimana)\b/.test(text)) return 'bantuan_lihat_nilai';
+  if (/\b(reply|balas|membalas|menjawab)\b/.test(text) && /\b(forum|diskusi)\b/.test(text)) return 'bantuan_forum';
+  if (/\b(buat|membuat|tambah|tambahkan|posting|topik)\b/.test(text) && /\b(forum|diskusi)\b/.test(text)) return 'bantuan_forum';
+  if (/\b(kumpul|kumpulin|mengumpulkan|upload|unggah|kirim|submit)\b/.test(text) && /\b(tugas|assignment)\b/.test(text)) return 'bantuan_kumpul_tugas';
+  if (/\b(kuis|quiz|quis|ujian)\b/.test(text) && /\b(cara|mengerjakan|kerjakan|mulai|submit|kirim|gimana|bagaimana)\b/.test(text)) return 'bantuan_kuis';
+  if (/\b(aktivitas|activity|daftar aktivitas)\b/.test(text) && /\b(lihat|cek|buka|cara|dimana|mana)\b/.test(text)) return 'bantuan_tugas';
+
+  if (isManualMaterialRequest(message)) return 'penjelasan_materi';
+  return '';
+}
+
+function getStoredMaterialQuery(pageContextState = {}, sessionMeta = {}) {
+  return pageContextState.last_material_query || sessionMeta.last_material_query || '';
+}
+
+function buildNoMaterialFoundResponse(message = '') {
+  const query = String(message || '').trim();
+  return [
+    'Pertanyaan kamu lebih mengarah ke **soal/materi pelajaran**, bukan panduan penggunaan VClass.',
+    '',
+    query ? `Aku sudah coba mencari materi yang paling dekat dengan: **${escapeHtml(query)}**.` : 'Aku sudah coba mencari materi yang paling dekat dari pertanyaanmu.',
+    'Tapi aku belum menemukan bagian materi yang benar-benar cocok di data VClass.',
+    '',
+    'Coba tulis topiknya lebih spesifik, misalnya: “materi CMS”, “apa itu WordPress”, atau “dampak media sosial”.'
+  ].join('\n');
+}
+
+function canonicalizeRetrievalQuery(message = '', fallbackMaterialQuery = '') {
   const text = String(message || '').trim();
   const normalized = normalizeText(text);
+
+  if (isGenericOpenMaterialRequest(text) && fallbackMaterialQuery) {
+    return fallbackMaterialQuery;
+  }
 
   if (/\b(sosial media|sosmed|media sosial)\b/i.test(normalized)) {
     if (/\b(dampak|pengaruh|efek|akibat|positif|negatif|manfaat|risiko|bahaya)\b/i.test(normalized)) return 'dampak media sosial';
     if (/\b(contoh|jenis|macam|aplikasi)\b/i.test(normalized)) return 'jenis dan contoh media sosial';
     return 'apa itu media sosial';
+  }
+
+  if (/\b(cms|content management system|content manajemen sistem|kepanjangan cms|singkatan cms)\b/i.test(normalized)) {
+    return 'cms content management system wordpress';
+  }
+
+  if (/\b(wordpress|word press)\b/i.test(normalized)) {
+    if (/\b(persen|berapa|pengguna|orang|dunia|market share|pangsa pasar)\b/i.test(normalized)) return 'wordpress pengguna cms website content management system';
+    return 'wordpress cms blog website';
+  }
+
+  const materialTopicMatch = normalized.match(/\b(?:buka|lihat|cek|tampilkan|cari)\s+(?:materi|bahan|sumber)(?:\s+(?:tentang|mengenai|soal|bab))?\s+(.+)$/i);
+  if (materialTopicMatch && materialTopicMatch[1]) {
+    const topic = materialTopicMatch[1]
+      .replace(/\b(vclass|virtual class|dong|coba|tolong|deh|ya)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (topic && !/^(materi|bahan|sumber)$/.test(topic)) return topic;
   }
 
   if (/\b(hoax|hoaks)\b/i.test(normalized)) return 'apa itu hoax';
@@ -87,39 +171,134 @@ function looksLikeMultipleChoiceQuestion(message = '') {
   return /(^|\n|\s)([A-Da-d])[\).]/.test(raw) || /\b(pilihan ganda|jawaban yang benar|pilih jawaban|opsi a|opsi b|opsi c|opsi d)\b/i.test(raw);
 }
 
-function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
-  const actions = [];
-  const seen = new Set();
 
-  (retrievalResults || []).slice(0, 3).forEach((item, index) => {
-    const metadata = item.metadata || {};
-    const fileUrl = item.file_url || item.url || item.source_url || metadata.file_url || metadata.source_url || metadata.url;
-    const fileType = item.file_type || metadata.file_type || '';
+function detectAcronymExpansionQuestion(message = '') {
+  const raw = String(message || '');
+  const normalized = normalizeText(raw);
 
-    if (!fileUrl || seen.has(fileUrl)) return;
-    seen.add(fileUrl);
+  // Menangkap: "kepanjangan cms", "cms itu apa", "cms adalah singkatan dari"
+  const explicit = normalized.match(/\b(?:kepanjangan|singkatan|arti singkatan|apa yang dimaksud dengan|apakah yang dimaksud dengan|apa itu)\s+([a-z]{2,8})\b/i)
+    || normalized.match(/\b([a-z]{2,8})\s+(?:itu\s+apa|adalah\s+singkatan|kepanjangannya)\b/i);
 
-    const title = item.title || metadata.title || item.topic || `Materi ${index + 1}`;
-    const pageNumber = Number(item.page_number || metadata.page_number || metadata.page || 1) || 1;
-    const highlightText = item.highlight_text || metadata.highlight_text || item.chunk_text || item.content || '';
+  const uppercase = raw.match(/\b([A-Z]{2,8})\b/);
+  const term = (explicit?.[1] || uppercase?.[1] || '').toUpperCase();
+  if (!term) return { isAcronym: false, term: '' };
 
-    const isPdf = String(fileUrl).toLowerCase().includes('.pdf') || String(fileType).toLowerCase().includes('pdf');
-    if (!isPdf) return;
+  const asksAcronym = /\b(kepanjangan|singkatan|akronim|apa yang dimaksud dengan|apakah yang dimaksud dengan|apa itu)\b/i.test(raw)
+    || /\b(itu apa)\b/i.test(raw)
+    || looksLikeMultipleChoiceQuestion(raw);
 
-    actions.push({
-      type: 'open_pdf_viewer',
-      label: `Buka sumber materi: ${title}`.slice(0, 80),
-      url: fileUrl,
-      page_number: pageNumber,
-      query,
-      highlight_text: highlightText,
-      content: item.content || item.chunk_text || ''
-    });
-  });
-
-  return actions;
+  return { isAcronym: asksAcronym && /^[A-Z0-9]{2,8}$/.test(term), term };
 }
 
+function isMaterialOpenRequest(message = '') {
+  const text = normalizeText(message);
+  return /\b(buka|lihat|cek|tampilkan|cari)\s+(materi|bahan|sumber)\b/i.test(text)
+    || /\b(materi|bahan|sumber)\s+(tentang|mengenai|cms|wordpress|word press|media sosial|hoax|cyberbullying|plugin|website|blog)\b/i.test(text);
+}
+
+function shouldBypassVisualGuideForManualMaterial(message = '', detectedIntent = '') {
+  const text = normalizeText(message);
+  if (!['akses_materi', 'navigasi_kursus', 'tutorial_steps'].includes(detectedIntent)) return false;
+  if (!isMaterialOpenRequest(message)) return false;
+  const asksUiHowTo = /\b(cara|gimana|bagaimana|klik|tombol|tab|menu|navigasi)\b/.test(text)
+    && /\b(login|dashboard|course|kursus|upload|kumpul|forum|quiz|kuis|logout)\b/.test(text);
+  return !asksUiHowTo || /\b(tentang|cms|media sosial|hoax|cyberbullying|wordpress|plugin)\b/.test(text);
+}
+
+function buildAcronymLearningResponse({ message = '', retrievalResults = [] } = {}) {
+  const { term } = detectAcronymExpansionQuestion(message);
+  const isMcq = looksLikeMultipleChoiceQuestion(message);
+  const lowerTerm = String(term || '').toLowerCase();
+  const sourceTitle = retrievalResults?.[0]?.title || retrievalResults?.[0]?.topic || '';
+  const hasMaterial = retrievalResults.length > 0;
+
+  if (isMcq) {
+    if (lowerTerm === 'cms') {
+      return [
+        'Ups, sepertinya ini bentuk soal pilihan ganda. Aku tidak akan langsung memilihkan opsi A/B/C, tapi aku bantu cara menentukannya ya.',
+        '',
+        'Untuk istilah **CMS**, coba pecah jadi 3 kata:',
+        '- **C** biasanya mengarah ke kata bahasa Inggris untuk “konten”.',
+        '- **M** mengarah ke kata bahasa Inggris untuk “pengelolaan/manajemen”.',
+        '- **S** mengarah ke kata bahasa Inggris untuk “sistem”.',
+        '',
+        'Sekarang cocokkan lagi dengan pilihan yang kamu punya. Perhatikan ejaan bahasa Inggrisnya, terutama kata untuk “management”.',
+        '',
+        hasMaterial ? 'Kalau masih ragu, klik tombol **Lihat materi** untuk membuka sumber materi yang berkaitan.' : 'Kalau masih ragu, coba cek materi VClass tentang CMS/WordPress atau tanyakan ke guru.'
+      ].join('\n');
+    }
+    return [
+      'Ups, sepertinya ini bentuk soal pilihan ganda. Aku tidak akan langsung memilihkan opsi, tapi aku bantu cara berpikirnya ya.',
+      '',
+      `Untuk singkatan **${escapeHtml(term)}**, coba cari kata inti dari setiap hurufnya satu per satu.`,
+      'Setelah itu cocokkan dengan opsi yang ejaannya paling tepat dan paling sesuai materi.',
+      '',
+      hasMaterial ? 'Kalau masih ragu, klik tombol **Lihat materi** untuk membuka sumber materi terkait.' : 'Kalau masih ragu, cek lagi materi VClass atau tanyakan ke guru.'
+    ].join('\n');
+  }
+
+  if (lowerTerm === 'cms') {
+    return [
+      'CMS adalah singkatan yang berkaitan dengan pengelolaan konten di sebuah sistem/website.',
+      '',
+      'Cara gampangnya: bayangkan ada tempat untuk membuat, mengatur, dan menerbitkan isi website tanpa harus menulis kode dari nol. Nah, konsep itulah yang biasanya dibahas saat menyebut CMS.',
+      '',
+      hasMaterial ? `Aku juga menemukan materi yang berkaitan${sourceTitle ? `: **${escapeHtml(sourceTitle)}**` : ''}. Klik **Lihat materi** kalau mau membuka sumbernya.` : 'Aku belum menemukan sumber materi yang sangat spesifik di data VClass. Coba cek materi VClass atau tanyakan ke guru jika perlu.'
+    ].join('\n');
+  }
+
+  return [
+    `Istilah **${escapeHtml(term)}** terlihat seperti singkatan.`,
+    'Untuk memahaminya, coba pecah hurufnya satu per satu, lalu cari kata bahasa Inggris/Indonesia yang sesuai dengan konteks materi.',
+    '',
+    hasMaterial ? 'Klik **Lihat materi** kalau ingin membuka sumber materi yang berkaitan.' : 'Aku belum menemukan materi yang sangat spesifik tentang singkatan ini.'
+  ].join('\n');
+}
+
+function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
+  const actions = [];
+  const pdfActions = [];
+  const moodleMaterials = [];
+  const seenPdf = new Set();
+  const seenMaterial = new Set();
+
+  (retrievalResults || []).slice(0, 6).forEach((item, index) => {
+    const metadata = item.metadata || {};
+    const fileUrl = item.file_url || item.url || item.source_url || metadata.file_url || metadata.source_url || metadata.url;
+    const fileType = item.file_type || metadata.file_type || metadata.content_type || '';
+    const title = item.title || metadata.module_name || metadata.title || item.topic || `Materi ${index + 1}`;
+    const pageNumber = Number(item.page_number || metadata.page_number || metadata.page || 1) || 1;
+    const highlightText = item.highlight_text || metadata.highlight_text || item.chunk_text || item.content || '';
+    const contentSnippet = String(item.content || item.chunk_text || highlightText || '').replace(/\s+/g, ' ').trim();
+    if (!fileUrl) return;
+    const isPdf = String(fileUrl).toLowerCase().includes('.pdf') || String(fileType).toLowerCase().includes('pdf');
+    const isMoodle = metadata.source_origin === 'moodle'
+      || /lms\.smpn167jakarta\.sch\.id/i.test(String(fileUrl))
+      || /\/mod\/(page|resource|book|label)\/view\.php/i.test(String(fileUrl));
+
+    if (isPdf && !seenPdf.has(fileUrl)) {
+      seenPdf.add(fileUrl);
+      pdfActions.push({ type: 'open_pdf_viewer', label: `Buka sumber materi: ${title}`.slice(0, 80), url: fileUrl, page_number: pageNumber, query, highlight_text: highlightText, content: item.content || item.chunk_text || '' });
+      return;
+    }
+
+    if (isMoodle && !seenMaterial.has(fileUrl) && moodleMaterials.length < 3) {
+      seenMaterial.add(fileUrl);
+      moodleMaterials.push({
+        title, topic: metadata.section_name || item.topic || '', url: fileUrl, source_url: fileUrl,
+        file_type: fileType || 'html', modname: metadata.modname || 'page', class_code: metadata.class_code || '',
+        course_id: metadata.moodle_course_id || null, module_id: metadata.module_id || null,
+        preview: contentSnippet.slice(0, 260), content: contentSnippet, snippets: contentSnippet ? [contentSnippet] : [], score: item.score || 0
+      });
+    }
+  });
+
+  if (moodleMaterials.length > 0) {
+    actions.push({ type: 'open_moodle_materials', label: moodleMaterials.length > 1 ? `Lihat ${moodleMaterials.length} materi terkait` : 'Lihat materi', materials: moodleMaterials });
+  }
+  return [...actions, ...pdfActions];
+}
 
 // ============================================================
 // STATIC IMAGE TUTORIALS
@@ -140,6 +319,20 @@ function detailImage(...segments) {
 const ENTRY_POINT_IMAGE = detailImage('ENTRY POINT.png');
 
 const STATIC_TUTORIALS = {
+  login: {
+    key: 'login',
+    title: 'Cara Login ke VClass',
+    shortTitle: 'Login VClass',
+    intent: 'bantuan_login',
+    intro: 'Tutorial ini menjelaskan langkah dasar untuk masuk ke akun VClass.',
+    note: 'Catatan: gambar bisa kamu ganti/update manual sesuai screenshot VClass terbaru.',
+    steps: [
+      { title: 'Buka halaman Login VClass', text: 'Buka halaman utama Virtual Class/VClass dari browser kamu, lalu cari tombol Login/Masuk.', image: detailImage('TUTORIAL LOGIN', '1.png') },
+      { title: 'Isi username/email dan password', text: 'Masukkan username/email dan password yang diberikan oleh guru atau admin sekolah.', image: detailImage('TUTORIAL LOGIN', '2.png') },
+      { title: 'Klik Masuk/Login', text: 'Klik tombol Masuk/Login. Jika gagal, cek lagi penulisan username/email dan password kamu.', image: detailImage('TUTORIAL LOGIN', '3.png') }
+    ]
+  },
+
   buat_forum: {
     key: 'buat_forum',
     title: 'Cara Membuat Forum Diskusi',
@@ -385,11 +578,79 @@ const STATIC_TUTORIALS = {
   }
 };
 
+// Deteksi pertanyaan yang jelas "cara/langkah" (prosedural) — bukan pengecekan status.
+// Tujuannya: "saya udah ngerjain tugas, cara ngumpulinnya gimana?" harus masuk
+// tutorial (bantuan_tugas), bukan "cek tugas belum selesai".
+function looksProceduralHowTo(message = '') {
+  const t = normalizeText(message);
+  const isProcedural = /\b(cara|caranya|gimana|gmn|bagaimana|tata cara|langkah|tutorial|panduan|step|stepnya|petunjuk)\b/i.test(t);
+  // Sinyal kuat bahwa user MEMANG menanyakan status/daftar, bukan how-to.
+  const isExplicitStatusQuery = /\b(mana yang|yang belum|apa aja|apa saja|daftar|list|sisa|berapa yang|sudah berapa|belum selesai|belum dikerjakan|belum dikumpulkan|belum dijawab)\b/i.test(t);
+  return isProcedural && !isExplicitStatusQuery;
+}
+
+// Pertanyaan umum yang aman dijawab sistem walau di luar materi (waktu, aritmatika sederhana).
+// Tetap menolak indikasi jailbreak / minta kode.
+function detectGeneralSafeQuestion(message = '') {
+  const raw = String(message || '');
+  const t = normalizeText(raw);
+  if (/\b(abaikan|ignore|system prompt|jailbreak|buatkan kode|tulis script|buatkan program|bikinin kode)\b/i.test(t)) {
+    return { type: null };
+  }
+  if (/\b(tanggal berapa|hari apa|hari ini tanggal|sekarang tanggal|sekarang hari|jam berapa|sekarang jam|pukul berapa|bulan apa|tahun berapa|sekarang bulan|sekarang tahun)\b/i.test(t)) {
+    return { type: 'datetime' };
+  }
+  const m = raw.match(/(-?\d+(?:[.,]\d+)?)\s*([+\-xX×*/:])\s*(-?\d+(?:[.,]\d+)?)/);
+  if (m) return { type: 'math', a: m[1], op: m[2], b: m[3] };
+  return { type: null };
+}
+
+function buildDateTimeAnswer() {
+  const now = new Date();
+  const tgl = now.toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const jam = now.toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
+  return `Sekarang **${tgl}**, pukul **${jam} WIB**. 😊\n\nKalau ada yang ingin kamu tanyakan seputar materi, aku siap bantu ya.`;
+}
+
+function buildMathAnswer({ a, op, b }) {
+  const x = parseFloat(String(a).replace(',', '.'));
+  const y = parseFloat(String(b).replace(',', '.'));
+  const isDiv = op === '/' || op === ':';
+  let r;
+  if (op === '+') r = x + y;
+  else if (op === '-') r = x - y;
+  else if (isDiv) r = y !== 0 ? x / y : null;
+  else r = x * y; // x, X, ×, *
+  const opLabel = op === '+' ? '+' : op === '-' ? '−' : isDiv ? '÷' : '×';
+  if (r === null) {
+    return 'Hmm, pembagian dengan nol tidak terdefinisi ya 😅. Lagipula pertanyaan ini di luar materi pelajaran kita.';
+  }
+  const rounded = Math.round(r * 1000) / 1000;
+  return `Aku tahu jawabannya kok: **${x} ${opLabel} ${y} = ${rounded}**. 🙂\n\nTapi sepertinya pertanyaan ini **di luar materi pelajaran** yang sedang kita bahas. Kalau ada yang ingin ditanyakan soal materi, aku bantu lebih detail ya.`;
+}
+
+// Bangun HANYA tombol carousel tutorial statis (tanpa tombol "lihat materi"),
+// dipakai saat AI menjawab konteks sistem agar tetap ada panduan step-by-step.
+function buildStaticTutorialCarouselAction(tutorialKey = '', originalMessage = '') {
+  const tutorial = STATIC_TUTORIALS[tutorialKey];
+  if (!tutorial) return null;
+  const payload = cloneStaticTutorial(tutorial);
+  payload.original_message = originalMessage;
+  return {
+    type: 'static_tutorial_carousel',
+    label: `Lihat Tutorial ${tutorial.shortTitle || tutorial.title}`,
+    payload
+  };
+}
+
 function isLmsStatusQuestion(message = '', intent = '') {
   const normalizedIntent = String(intent || '').toLowerCase().trim();
   const text = normalizeText(message);
 
   if (LMS_INTENTS.includes(normalizedIntent)) return true;
+
+  // Pertanyaan "cara/langkah" tidak boleh dianggap pengecekan status.
+  if (looksProceduralHowTo(message)) return false;
 
   const asksStatus = /\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja|daftar|list|cek|kerjain|ngerjain|dikerjain|deadline|tenggat|batas waktu|hari ini|terdekat|kerjain|ngerjain|dikerjain)\b/i.test(text);
   const mentionsActivity = /\b(quiz|kuis|quis|ujian|ulangan|soal|forum|diskusi|tugas|assignment|aktivitas|activity)\b/i.test(text);
@@ -399,6 +660,10 @@ function isLmsStatusQuestion(message = '', intent = '') {
 
 function inferLmsStatusIntentFromMessage(message = '') {
   const text = normalizeText(message);
+
+  // Prioritas: jika ini pertanyaan "cara/langkah", JANGAN dipetakan ke status LMS.
+  if (looksProceduralHowTo(message)) return '';
+
   const hasStatus = /\b(belum|blm|nggak|gak|tidak|mana|apa aja|apa saja|daftar|list|cek|kerjain|ngerjain|dikerjain)\b/i.test(text);
 
   if (/\b(deadline|tenggat|batas waktu|jatuh tempo)\b/i.test(text)) {
@@ -421,7 +686,14 @@ function inferLmsStatusIntentFromMessage(message = '') {
   return '';
 }
 
-function buildAiFollowupPromptForTutorial(tutorial = {}) {
+function buildAiFollowupPromptForTutorial(tutorial = {}, originalMessage = '') {
+  // Utamakan pertanyaan ASLI user supaya AI tahu konteks persis yang ditanyakan,
+  // bukan kalimat generik "jelaskan fitur ini".
+  const orig = String(originalMessage || '').trim();
+  if (orig) {
+    return `Tolong jelaskan secara singkat, jelas, dan langkah demi langkah untuk pertanyaan ini: "${orig}"`;
+  }
+
   const title = String(tutorial.title || tutorial.shortTitle || 'panduan VClass')
     .replace(/^Cara\s+/i, '')
     .trim();
@@ -440,6 +712,7 @@ function resolveStaticTutorialKey(intent = '', message = '') {
   if (isLmsStatusQuestion(text, normalizedIntent)) return '';
 
   const byIntent = {
+    bantuan_login: 'login',
     tutorial_buat_forum: 'buat_forum',
     tutorial_reply_forum: 'reply_forum',
     tutorial_kumpulin_tugas: 'kumpulin_tugas',
@@ -506,7 +779,7 @@ function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', e
         label: 'Belum jelas, jelaskan dengan AI',
         payload: {
           original_message: effectiveMessage,
-          message: buildAiFollowupPromptForTutorial(tutorial),
+          message: buildAiFollowupPromptForTutorial(tutorial, effectiveMessage),
           source_answer: `Panduan sistem berbasis gambar statis: ${tutorial.title}`,
           intent: tutorial.intent,
           responseMode: 'short',
@@ -517,6 +790,66 @@ function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', e
       { type: 'system_feedback_ok', label: 'Sudah jelas' }
     ]
   };
+}
+
+// ===== [v0.7.0] Mention @materi-N: pencarian tertarget di satu dokumen ===========
+function stripMentionTokens(message = '') {
+  return String(message || '').replace(/@[\w-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Ambil kata kunci penting (>=4 huruf) dari query untuk highlight & cek relevansi.
+function extractQueryKeywords(query = '') {
+  const stop = new Set(['apa', 'itu', 'yang', 'dan', 'atau', 'dengan', 'untuk', 'pada', 'dari', 'adalah', 'kenapa', 'kenapa', 'gimana', 'bagaimana', 'sih', 'dong', 'tentang', 'jelaskan', 'maksud']);
+  return Array.from(new Set(
+    String(query || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').split(/\s+/)
+      .filter((w) => w.length >= 3 && !stop.has(w))
+  ));
+}
+
+// Potong cuplikan di sekitar kemunculan keyword pertama (biar relevan).
+function buildMentionSnippet(content = '', keywords = [], maxLen = 280) {
+  const text = String(content || '').replace(/\s+/g, ' ').trim();
+  if (!text) return 'Materi terkait ditemukan di dokumen sumber.';
+  const lower = text.toLowerCase();
+  let pos = -1;
+  for (const kw of keywords) {
+    const i = lower.indexOf(kw);
+    if (i !== -1 && (pos === -1 || i < pos)) pos = i;
+  }
+  if (pos === -1) return text.slice(0, maxLen) + (text.length > maxLen ? '…' : '');
+  const start = Math.max(0, pos - 80);
+  const end = Math.min(text.length, start + maxLen);
+  return (start > 0 ? '…' : '') + text.slice(start, end).trim() + (end < text.length ? '…' : '');
+}
+
+// [v0.9.3] Bedakan "intent" saran lanjutan @materi → tiap jenis punya prompt sendiri,
+// dan masing-masing di-cache terpisah (rangkum/poin/jelaskan/soal).
+function detectMentionTask(message = '') {
+  const t = String(message || '').toLowerCase();
+  if (/\b(rangkum|ringkas|ringkasan|rangkuman|resume|kesimpulan|simpulkan|garis besar)\b/.test(t)) return 'summary';
+  if (/(poin penting|poin-poin|poin penting materi|kata kunci|inti dari|intinya|poin utama)/.test(t)) return 'keypoints';
+  if (/(buat|bikin|berikan).{0,20}(soal|latihan|kuis|pertanyaan)|soal latihan/.test(t)) return 'quiz';
+  if (/(jelaskan|terangkan).{0,30}(sederhana|mudah|gampang)|bahasa sederhana|jelaskan materi ini|jelaskan keseluruhan|jelaskan semua/.test(t)) return 'simplify';
+  return null;
+}
+
+function buildMentionTaskPrompt(task, label, materiContent, cleanQ) {
+  const head = `Kamu AI Learning Buddy untuk siswa SMP. Bahasa Indonesia sederhana. HANYA gunakan isi materi di bawah, JANGAN mengarang di luar materi.`;
+  const body = `\n\n=== ISI MATERI "${label}" ===\n${materiContent}`;
+  if (task === 'summary') {
+    return `${head}\nBuat RANGKUMAN: 1 kalimat inti, lalu 3-6 poin bullet, lalu 1 kalimat penutup.${body}`;
+  }
+  if (task === 'keypoints') {
+    return `${head}\nTuliskan POIN-POIN PENTING materi ini sebagai bullet singkat (5-8 poin), tiap poin 1 baris.${body}`;
+  }
+  if (task === 'simplify') {
+    return `${head}\nJELASKAN materi ini dengan bahasa SANGAT sederhana untuk siswa SMP, boleh pakai analogi sehari-hari agar mudah dipahami.${body}`;
+  }
+  if (task === 'quiz') {
+    return `${head}\nBuat 3 SOAL LATIHAN dari materi ini (boleh pilihan ganda/isian). Untuk tiap soal beri petunjuk cara menjawab. Taruh kunci jawaban singkat di bagian paling bawah dengan judul "Kunci".${body}`;
+  }
+  // Tanya-jawab bebas (mode AI) atas materi.
+  return `${head}\nJawab pertanyaan siswa berdasarkan materi ini. Jika tidak ada di materi, katakan terus terang & sarankan tanya guru.\nPertanyaan: ${cleanQ}${body}`;
 }
 
 function isCacheableAIRequest({ detectedIntent, forceAI, forceFAQ, forceSystem }) {
@@ -1361,7 +1694,7 @@ function isAiFollowupPrompt(message = '', forceAI = false) {
 // FUNGSI UTAMA
 
 const chatService = {
-  async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null }) {
+  async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null, mention = null }) {
     const session = await chatModel.getSessionById(sessionId);
     let pageContextState = safeParseObject(session.page_context, {});
 
@@ -1432,11 +1765,49 @@ const chatService = {
     const effectiveMessage = forceAI ? cleanFeedbackPrompt(message) : message;
     let detectedIntent = intent || await intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI });
 
+    const manualMappedIntent = !intent ? inferManualSidebarIntent(effectiveMessage) : '';
+    if (!forceAI && manualMappedIntent) {
+      detectedIntent = manualMappedIntent;
+    }
+
     // Guard tambahan: jangan biarkan pertanyaan status LMS seperti
     // "Quiz apa yang belum saya kerjakan?" salah masuk ke tutorial "Cara mengerjakan kuis".
     const lmsStatusIntent = inferLmsStatusIntentFromMessage(effectiveMessage);
     if (!forceAI && lmsStatusIntent) {
       detectedIntent = lmsStatusIntent;
+    }
+
+    // [PATCH] Deteksi pembatasan kelas (Cross-Class Isolation).
+    // Diletakkan setelah effectiveMessage, safetyState, dan detectedIntent siap
+    // agar tidak terkena Temporal Dead Zone (ReferenceError).
+    const userClassCode = classCode ? classCode.toUpperCase() : '';
+    const requestedClassMatch = effectiveMessage.match(/\bkelas\s+([0-9]+[a-z]?)\b/i);
+
+    if (requestedClassMatch && userClassCode) {
+      const requestedClass = requestedClassMatch[1].toUpperCase();
+      if (requestedClass !== userClassCode && !userClassCode.includes(requestedClass)) {
+        return {
+          intent: 'out_of_context',
+          response_source: 'system',
+          ai_usage: aiRateLimitService.getStatus(sessionId),
+          is_locked: safetyState.locked,
+          warnings: safetyState.warnings,
+          botMessage: {
+            message: `Maaf, kamu hanya dapat mengakses materi yang tersedia untuk kelasmu (Kelas ${userClassCode}).`,
+            actions: []
+          }
+        };
+      }
+    }
+
+    const textMaterialCheck = normalizeText(effectiveMessage);
+    const isExplicitMaterialRequest = /\b(buka|lihat|cari|tampilkan)\s+(materi|modul|sumber)\b/i.test(textMaterialCheck);
+
+    const manualMaterialRequest = isManualMaterialRequest(effectiveMessage) || isExplicitMaterialRequest;
+
+    if (manualMaterialRequest || shouldBypassVisualGuideForManualMaterial(effectiveMessage, detectedIntent)) {
+      detectedIntent = 'penjelasan_materi';
+      expectedSourceType = 'document_chunk';
     }
 
     if (LMS_INTENTS.includes(detectedIntent)) {
@@ -1447,17 +1818,6 @@ const chatService = {
         });
       } catch (e) {
         console.error('[Chat Service] Error memuat LMS Context:', e.message);
-        lmsContext = {
-          course: {},
-          courses: [],
-          activities: [],
-          deadlines: [],
-          hasConfig: true,
-          progress_available: false,
-          error: true,
-          timeout: /timeout|aborted|terlalu lama/i.test(String(e.message || '')),
-          error_message: e.message || 'Moodle sedang lambat atau tidak merespons.'
-        };
       }
     }
 
@@ -1554,6 +1914,168 @@ const chatService = {
     await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
     let aiUsage = aiRateLimitService.getStatus(sessionId);
 
+    // ==========================================
+    // [v0.7.0] MENTION @materi-N: pencarian TERTARGET di satu dokumen materi.
+    // Prioritas tinggi — diletakkan sebelum acronym/visual guide.
+    // ==========================================
+    if (mention?.type === 'materi' && (mention.documentId || mention.title || mention.sourceUrl || mention.url || mention.label)) {
+      const cleanQ = stripMentionTokens(effectiveMessage) || effectiveMessage;
+      const keywords = extractQueryKeywords(cleanQ);
+      const label = mention.label || mention.title || 'materi yang dipilih';
+
+      // [v0.9.0] Deteksi maksud "rangkum/ringkas" — ini jalur yang dulu selalu gagal
+      // karena retrieval berbasis skor keyword (skor "rangkum materi ini" = 0).
+      const wantsSummary = /\b(rangkum|ringkas|ringkasan|rangkuman|resume|kesimpulan|simpulkan|inti|poin penting|garis besar|jelaskan keseluruhan|jelaskan semua)\b/i.test(effectiveMessage);
+
+      // 1) Ambil isi dokumen target LANGSUNG via document_id (tidak bergantung skor).
+      //    Inilah sumber kebenaran untuk rangkuman & jawaban AI atas materi tsb.
+      let targetChunks = [];
+      if (mention.documentId) {
+        try { targetChunks = await chunkModel.findByDocumentId(mention.documentId); }
+        catch (e) { console.error('[Mention] ambil chunk dokumen gagal:', e.message); }
+      }
+
+      // 2) Retrieval tetap dipakai untuk jalur tanya-jawab spesifik (snippet + highlight).
+      //    Sertakan label agar dokumen target lebih mudah naik peringkat.
+      let mentionResults = [];
+      try {
+        mentionResults = await retrievalService.retrieve(projectId, `${label} ${cleanQ}`.trim(), pageContext, 12, { sourceType: 'document_chunk' });
+      } catch (e) { console.error('[Mention] retrieve gagal:', e.message); }
+
+      // Cocokkan dokumen target via document_id (paling akurat) ATAU source_url / judul.
+      const targetId = mention.documentId ? String(mention.documentId) : '';
+      const targetUrl = String(mention.sourceUrl || mention.url || '').trim();
+      const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+      const targetTitle = normTitle(mention.title || mention.label);
+      const matchesTarget = (r) => {
+        const m = r.metadata || {};
+        if (targetId && String(m.document_id) === targetId) return true;
+        if (targetUrl && (m.source_url === targetUrl || m.url === targetUrl || m.file_url === targetUrl)) return true;
+        if (targetTitle) {
+          const t = normTitle([m.title, m.module_name, r.title].filter(Boolean).join(' '));
+          if (t && (t.includes(targetTitle) || targetTitle.includes(t))) return true;
+        }
+        return false;
+      };
+      const inTarget = mentionResults.filter(matchesTarget);
+      const elsewhere = mentionResults.filter((r) => !matchesTarget(r));
+
+      const targetHit = inTarget.find((r) => Number(r.score || 0) >= 10) || null;
+      const elsewhereHits = elsewhere.filter((r) => Number(r.score || 0) >= 12).slice(0, 3);
+
+      // Gabungan isi materi untuk diberikan ke AI (utamakan chunk target langsung).
+      const materiContent = (targetChunks.length
+        ? targetChunks.slice().sort((a, b) => (a.chunk_index || 0) - (b.chunk_index || 0)).map((c) => c.chunk_text)
+        : inTarget.map((r) => r.content || r.chunk_text)
+      ).filter(Boolean).join('\n\n').slice(0, 8000);
+
+      const aiAvailable = !(aiUsage.cooldown_active || aiUsage.limit_reached || aiUsage.canUseAI === false);
+      // [v0.9.3] Tiap saran lanjutan @materi punya "task" sendiri (rangkum/poin/jelaskan/soal).
+      const mentionTask = detectMentionTask(effectiveMessage);
+      const wantsAiKind = Boolean(mentionTask) || forceAI;
+
+      // ====== JALUR AI dengan CACHE-FIRST (rangkum/poin/jelaskan/soal/tanya) ======
+      // Cache dulu: kalau sudah pernah dijawab → kembalikan tanpa kuota AI (berlaku walau habis).
+      // Kalau belum → hit AI lalu SIMPAN ke cache.
+      if (wantsAiKind && materiContent) {
+        const docKey = String(mention.documentId || targetUrl || label || '').toLowerCase().slice(0, 120);
+        const cacheCtxHash = `mention:${docKey}`;
+        const normalizedQ = mentionTask ? `${mentionTask} materi ${docKey}` : aiResponseCacheModel.normalizeQuestion(cleanQ);
+        const mentionCacheKey = aiResponseCacheModel.buildCacheKey(projectId, normalizedQ, cacheCtxHash);
+        const mentionActions = () => buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ);
+
+        // 1) CACHE-FIRST.
+        try {
+          const cached = await aiResponseCacheModel.findByKey(projectId, mentionCacheKey);
+          if (cached?.answer) {
+            aiResponseCacheModel.incrementHit(cached.id).catch(() => {});
+            const cachedActions = mentionActions();
+            const cachedText = addStudentGreeting(cached.answer, studentName) + '\n\n📚 Diambil dari basis pengetahuan sistem (hemat kuota AI).';
+            await chatModel.createMessage({
+              session_id: sessionId, role: 'assistant', message: cachedText, intent: 'penjelasan_materi',
+              context_used: { response_source: 'system', actions: cachedActions, used_model: 'cache', cache_hit: true, cache_id: cached.id, mention_task: mentionTask || 'qa' }
+            });
+            return {
+              intent: 'penjelasan_materi', response_source: 'system', ai_usage: aiUsage, used_model: 'cache',
+              is_locked: safetyState.locked, warnings: safetyState.warnings,
+              botMessage: { message: cachedText, actions: cachedActions }
+            };
+          }
+        } catch (e) { console.warn('[Mention Cache] baca gagal:', e.message); }
+
+        // 2) Tidak ada di cache → hit AI bila tersedia, lalu SIMPAN.
+        if (aiAvailable) {
+          const aiPrompt = buildMentionTaskPrompt(mentionTask, label, materiContent, cleanQ);
+          try {
+            const geminiResult = await aiQueueService.add(() => geminiService.generateWithFallback(aiPrompt), { sessionId, intent: 'penjelasan_materi', responseMode });
+            if (geminiResult.ok) {
+              aiUsage = aiRateLimitService.consume(sessionId);
+              aiResponseCacheModel.upsertCache({
+                project_id: projectId, cache_key: mentionCacheKey,
+                question: mentionTask ? `${mentionTask} ${label}` : cleanQ, normalized_question: normalizedQ,
+                answer: geminiResult.text, response_source: 'ai', intent: 'penjelasan_materi',
+                source_type: 'document_chunk', context_hash: cacheCtxHash, model: geminiResult.model, expires_at: getExpiresAt()
+              }).catch((e) => console.warn('[Mention Cache] simpan gagal:', e.message));
+
+              const aiActions = mentionActions();
+              const finalText = addStudentGreeting(geminiResult.text, studentName);
+              await chatModel.createMessage({
+                session_id: sessionId, role: 'assistant', message: finalText, intent: 'penjelasan_materi',
+                context_used: { response_source: 'ai', actions: aiActions, used_model: geminiResult.model || 'mention_materi_ai', mention_task: mentionTask || 'qa' }
+              });
+              return {
+                intent: 'penjelasan_materi', response_source: 'ai', ai_usage: aiUsage, used_model: geminiResult.model,
+                is_locked: safetyState.locked, warnings: safetyState.warnings,
+                botMessage: { message: finalText, actions: aiActions }
+              };
+            } else if (geminiResult.quotaFallback) {
+              aiRateLimitService.markGlobalExhausted();
+            }
+          } catch (e) {
+            console.error('[Mention AI] gagal, fallback ke sistem:', e.message);
+          }
+        }
+      }
+
+      // ====== JALUR SISTEM (deterministik) ======
+      let mText = '';
+      let mActions = [];
+
+      if (wantsAiKind && materiContent) {
+        // Minta jawaban AI tapi tak tersedia (cooldown/kuota) → beri cuplikan + arahkan.
+        const preview = buildMentionSnippet(materiContent, keywords, 360);
+        mText = `Ini cuplikan dari **${label}**:\n\n[ACCORDION=${label}]\n${preview}\n[/ACCORDION]\n\nUntuk jawaban AI penuh (rangkuman/penjelasan), kuota AI bersama sedang penuh — coba lagi nanti ya, atau baca cuplikan di atas dulu.`;
+        mActions = buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ);
+      } else if (targetHit) {
+        const snippet = buildMentionSnippet(targetHit.content || targetHit.chunk_text, keywords);
+        mText = `Aku menemukan bagian yang relevan di **${label}**:\n\n[ACCORDION=${targetHit.title || targetHit.topic || label}]\n${snippet}\n[/ACCORDION]\n\nKlik tombol di bawah untuk membuka materinya — bagian yang cocok akan disorot.`;
+        mActions = buildSourceActionsFromRetrieval([targetHit], cleanQ);
+      } else if (elsewhereHits.length) {
+        const listText = elsewhereHits
+          .map((h) => `[ACCORDION=${h.title || h.topic || 'Materi lain'}]\n${buildMentionSnippet(h.content || h.chunk_text, keywords)}\n[/ACCORDION]`)
+          .join('\n');
+        mText = `Di **${label}** aku belum menemukan jawaban yang pas. Tapi sepertinya pembahasannya ada di materi lain berikut — mau dibuka?\n\n${listText}`;
+        mActions = buildSourceActionsFromRetrieval(elsewhereHits, cleanQ);
+      } else if (materiContent) {
+        // Ada isi materi tapi tak ada keyword cocok & bukan mode AI → tawarkan cuplikan + rangkuman.
+        const preview = buildMentionSnippet(materiContent, keywords, 360);
+        mText = `Ini cuplikan dari **${label}**:\n\n[ACCORDION=${label}]\n${preview}\n[/ACCORDION]\n\nMau aku **rangkum** materi ini? Ketik "rangkum materi ini", atau buka materinya lewat tombol di bawah.`;
+        mActions = buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ);
+      } else {
+        mText = `Maaf, pertanyaan itu belum aku temukan di **${label}** maupun di materi lainnya. Coba pakai kata kunci yang lebih spesifik, atau tanyakan langsung tanpa mention ya. 🙏`;
+      }
+
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message: addStudentGreeting(mText, studentName), intent: 'penjelasan_materi',
+        context_used: { response_source: 'system', actions: mActions, used_model: 'mention_materi' }
+      });
+      return {
+        intent: 'penjelasan_materi', response_source: 'system', ai_usage: aiUsage,
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: addStudentGreeting(mText, studentName), actions: mActions }
+      };
+    }
+
     if (isQuickVisualGuideIntent(detectedIntent)) {
       const visualGuideText = buildQuickVisualGuideResponse({
         studentName,
@@ -1613,17 +2135,73 @@ const chatService = {
       }
     }
 
+    const acronymInfo = detectAcronymExpansionQuestion(effectiveMessage);
+    if (acronymInfo.isAcronym) {
+      const retrievalQuery = canonicalizeRetrievalQuery(effectiveMessage);
+      const acronymRetrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 3, { sourceType: expectedSourceType || 'document_chunk' });
+      const sourceActions = buildSourceActionsFromRetrieval(acronymRetrievalResults, retrievalQuery);
+      const acronymText = buildAcronymLearningResponse({ message: effectiveMessage, retrievalResults: acronymRetrievalResults });
+      const responseSourceForAcronym = forceAI ? 'ai' : 'system';
+
+      await chatModel.createMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        message: addStudentGreeting(acronymText, studentName),
+        intent: detectedIntent || 'penjelasan_materi',
+        context_used: { response_source: responseSourceForAcronym, actions: sourceActions, used_model: 'system_acronym_learning_guard' }
+      });
+
+      return {
+        intent: detectedIntent || 'penjelasan_materi',
+        response_source: responseSourceForAcronym,
+        ai_usage: aiUsage,
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        botMessage: { message: addStudentGreeting(acronymText, studentName), actions: sourceActions }
+      };
+    }
+
+    // ==========================================
+    // PERTANYAAN UMUM AMAN (waktu / aritmatika) — dijawab SISTEM, bukan AI.
+    // Mencegah "1 + 1" salah dideteksi sebagai pertanyaan materi informatika.
+    // ==========================================
+    const generalSafe = detectGeneralSafeQuestion(effectiveMessage);
+    if (!forceAI && generalSafe.type && !LMS_INTENTS.includes(detectedIntent) && !manualMaterialRequest) {
+      const generalText = generalSafe.type === 'datetime' ? buildDateTimeAnswer() : buildMathAnswer(generalSafe);
+      const generalIntent = generalSafe.type === 'datetime' ? detectedIntent : 'out_of_context';
+
+      await chatModel.createMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        message: addStudentGreeting(generalText, studentName),
+        intent: generalIntent,
+        context_used: { response_source: 'system', actions: [], used_model: 'system_general_safe' }
+      });
+
+      return {
+        intent: generalIntent,
+        response_source: 'system',
+        ai_usage: aiUsage,
+        is_locked: safetyState.locked,
+        warnings: safetyState.warnings,
+        botMessage: { message: addStudentGreeting(generalText, studentName), actions: [] }
+      };
+    }
+
     let retrievalResults = [];
     let contextString = '';
     const skipRetrievalIntents = ['bantuan_burnout', 'out_of_context', 'greeting', 'hubungi_guru'];
+    const storedMaterialQuery = getStoredMaterialQuery(pageContextState, sessionMeta);
+    const retrievalQuery = canonicalizeRetrievalQuery(effectiveMessage, storedMaterialQuery);
+    const shouldForceMaterialRetrieval = detectedIntent === 'penjelasan_materi' || manualMaterialRequest;
     const shouldSkipRetrieval =
       skipRetrievalIntents.includes(detectedIntent) ||
       LMS_INTENTS.includes(detectedIntent) ||
-      isQuickVisualGuideIntent(detectedIntent);
+      (isQuickVisualGuideIntent(detectedIntent) && !shouldForceMaterialRetrieval);
 
     if (!shouldSkipRetrieval) {
-      const retrievalQuery = canonicalizeRetrievalQuery(effectiveMessage);
-      retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 3, { sourceType: expectedSourceType || 'all' });
+      const retrievalSourceType = shouldForceMaterialRetrieval ? 'document_chunk' : (expectedSourceType || 'all');
+      retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 4, { sourceType: retrievalSourceType });
       contextString = contextBuilderService.build(retrievalResults);
     }
 
@@ -1637,16 +2215,49 @@ const chatService = {
     });
 
     // Mode Jawaban Sistem untuk pertanyaan materi: jangan langsung masuk AI.
-    // Tampilkan ringkasan referensi + tombol PDF, lalu user bisa pilih mode AI bila butuh penjelasan bebas.
-    if (responseMode === 'system' && !forceAI && retrievalResults.length > 0 && !LMS_INTENTS.includes(detectedIntent)) {
-      const sourceActions = buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage));
-      const first = retrievalResults[0] || {};
-      const previewText = String(first.content || first.chunk_text || '').replace(/\s+/g, ' ').trim();
-      const guardedText = looksLikeMultipleChoiceQuestion(effectiveMessage)
-        ? 'Aku tidak akan langsung memilihkan jawaban A/B/C/D. Aku bantu kamu memahami konsepnya dulu dari sumber materi berikut.'
-        : 'Aku menemukan bagian materi yang berkaitan. Baca ringkasan sumber berikut, lalu buka PDF untuk melihat bagian yang di-highlight.';
+    // Tampilkan ringkasan referensi + tombol Lihat materi. Kalau tidak ada, beri arahan yang jelas.
+    if (responseMode === 'system' && !forceAI && shouldForceMaterialRetrieval && !LMS_INTENTS.includes(detectedIntent)) {
+      const sourceActions = buildSourceActionsFromRetrieval(retrievalResults, retrievalQuery);
+      let systemText = '';
 
-      const systemText = `${guardedText}\n\n[ACCORDION=${first.title || first.topic || 'Materi terkait'}]\n${previewText || 'Materi terkait ditemukan di dokumen sumber.'}\n[/ACCORDION]`;
+      if (retrievalResults.length > 0) {
+        const first = retrievalResults[0] || {};
+        const previewText = String(first.content || first.chunk_text || '').replace(/\s+/g, ' ').trim();
+        const guardedText = looksLikeMultipleChoiceQuestion(effectiveMessage)
+          ? 'Aku tidak akan langsung memilihkan jawaban A/B/C/D. Aku bantu kamu memahami konsepnya dulu dari sumber materi berikut.'
+          : 'Pertanyaan kamu lebih mengarah ke **materi/pelajaran**. Aku menemukan sumber materi yang berkaitan. Baca ringkasannya, lalu klik tombol **Lihat materi** untuk membuka sumbernya.';
+
+        systemText = `${guardedText}
+
+[ACCORDION=${first.title || first.topic || 'Materi terkait'}]
+${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
+[/ACCORDION]`;
+
+        await chatModel.updateSession(sessionId, {
+          page_context: {
+            ...pageContextState,
+            last_material_query: retrievalQuery,
+            last_material_title: first.title || first.topic || ''
+          }
+        }).catch(() => {});
+      } else {
+        systemText = buildNoMaterialFoundResponse(retrievalQuery || effectiveMessage);
+      }
+
+      // sys#6: tawarkan penjelasan AI dengan membawa pertanyaan ASLI user.
+      sourceActions.push({
+        type: 'ask_ai',
+        label: 'Belum paham? Minta AI menjelaskan',
+        payload: {
+          original_message: effectiveMessage,
+          message: effectiveMessage,
+          source_answer: String(systemText).replace(/\[\/?ACCORDION[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400),
+          intent: detectedIntent,
+          responseMode: 'short',
+          forceAI: true,
+          expectedSourceType: 'document_chunk'
+        }
+      });
 
       await chatModel.createMessage({
         session_id: sessionId,
@@ -1679,6 +2290,46 @@ const chatService = {
         is_locked: safetyState.locked, warnings: safetyState.warnings,
         botMessage: { message: addStudentGreeting(sysRes.text, studentName), actions: sysRes.actions || [] }
       };
+    }
+
+    // ==========================================
+    // CACHE-FIRST (v0.5.0): pertanyaan AI yang berulang dijawab dari basis pengetahuan
+    // dan dilabeli "Jawaban Sistem" agar hemat kuota AI. Tetap berlaku saat AI cooldown.
+    // forceAI ("jelaskan dengan AI") tetap minta jawaban segar dari AI.
+    // ==========================================
+    const cacheable = isCacheableAIRequest({ detectedIntent, forceAI, forceFAQ, forceSystem: responseMode === 'system' });
+    const cacheContextHash = cacheable ? buildContextHash(retrievalResults) : '';
+    const cacheKey = cacheable
+      ? aiResponseCacheModel.buildCacheKey(projectId, aiResponseCacheModel.normalizeQuestion(effectiveMessage), cacheContextHash)
+      : '';
+
+    if (cacheable && !forceAI) {
+      try {
+        let cached = await aiResponseCacheModel.findByKey(projectId, cacheKey);
+        if (!cached) {
+          cached = await aiResponseCacheModel.findBestSimilar(projectId, effectiveMessage, { intent: detectedIntent, threshold: 0.8 });
+        }
+        if (cached?.answer) {
+          aiResponseCacheModel.incrementHit(cached.id).catch(() => {});
+          const cachedActions = [
+            ...(sysRes.actions || []),
+            ...buildSourceActionsFromRetrieval(retrievalResults, retrievalQuery)
+          ];
+          const cachedText = addStudentGreeting(cached.answer, studentName)
+            + '\n\n📚 Jawaban ini diambil dari basis pengetahuan sistem (hemat kuota AI).';
+          await chatModel.createMessage({
+            session_id: sessionId, role: 'assistant', message: cachedText, intent: detectedIntent,
+            context_used: { response_source: 'system', actions: cachedActions, used_model: 'cache', cache_hit: true, cache_id: cached.id }
+          });
+          return {
+            intent: detectedIntent, response_source: 'system', ai_usage: aiUsage, used_model: 'cache',
+            is_locked: safetyState.locked, warnings: safetyState.warnings,
+            botMessage: { message: cachedText, actions: cachedActions }
+          };
+        }
+      } catch (e) {
+        console.warn('[Cache] gagal membaca cache:', e.message);
+      }
     }
 
     // ==========================================
@@ -1721,13 +2372,46 @@ const chatService = {
         aiUsage = aiRateLimitService.consume(sessionId);
         botMessageText = geminiResult.text;
         responseSource = 'ai';
-        actions = [
-          ...(sysRes.actions || []),
-          ...buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage))
-        ];
+        // AI#1: kalau ini konteks sistem (punya tutorial statis), tampilkan tombol
+        // step-by-step tutorial — BUKAN tombol "lihat materi terkait".
+        const aiTutorialAction = buildStaticTutorialCarouselAction(
+          resolveStaticTutorialKey(detectedIntent, effectiveMessage),
+          effectiveMessage
+        );
+        actions = aiTutorialAction
+          ? [...(sysRes.actions || []), aiTutorialAction]
+          : [...(sysRes.actions || []), ...buildSourceActionsFromRetrieval(retrievalResults, retrievalQuery)];
+        if (shouldForceMaterialRetrieval && retrievalResults.length > 0) {
+          const firstMaterial = retrievalResults[0] || {};
+          await chatModel.updateSession(sessionId, {
+            page_context: {
+              ...pageContextState,
+              last_material_query: retrievalQuery,
+              last_material_title: firstMaterial.title || firstMaterial.topic || ''
+            }
+          }).catch(() => {});
+        }
+        // [v0.5.0] Simpan jawaban AI ke cache agar pertanyaan serupa berikutnya
+        // bisa dijawab sistem tanpa memakai kuota AI.
+        if (cacheable && cacheKey && geminiResult.text) {
+          aiResponseCacheModel.upsertCache({
+            project_id: projectId,
+            cache_key: cacheKey,
+            question: effectiveMessage,
+            answer: geminiResult.text,
+            response_source: 'ai',
+            intent: detectedIntent,
+            source_type: expectedSourceType || 'document_chunk',
+            context_hash: cacheContextHash,
+            model: geminiResult.model,
+            expires_at: getExpiresAt()
+          }).catch((e) => console.warn('[Cache] gagal menyimpan cache:', e.message));
+        }
       } else if (geminiResult.quotaFallback) {
         aiErrorFallback = true;
         quotaFallback = true;
+        // [v0.9.2] Tandai kuota AI BERSAMA habis agar bar di FE langsung 100% (bukan 0%).
+        aiRateLimitService.markGlobalExhausted();
         botMessageText = 'AI sedang kehabisan kuota atau terlalu sibuk. ' + (sysRes.text || '');
       }
     } catch (error) {
@@ -1739,7 +2423,7 @@ const chatService = {
       botMessageText = sysRes.text;
       actions = [
         ...(sysRes.actions || []),
-        ...buildSourceActionsFromRetrieval(retrievalResults, canonicalizeRetrievalQuery(effectiveMessage))
+        ...buildSourceActionsFromRetrieval(retrievalResults, retrievalQuery)
       ];
       responseSource = 'system';
     }

@@ -1,5 +1,6 @@
 // src/services/ai/gemini.service.js
 const { GoogleGenAI } = require('@google/genai');
+const aiRateLimitService = require('./aiRateLimit.service');
 
 // Daftar model terbaru yang aktif, diurutkan dari yang paling ringan/murah ke berat
 const MODEL_CHAIN = [
@@ -18,6 +19,9 @@ const geminiService = {
     }
 
     const ai = new GoogleGenAI({ apiKey: apiKey });
+
+    // [v0.9.3] Catat 1 permintaan AI bersama (proxy RPD untuk bar kuota di FE).
+    try { aiRateLimitService.recordGlobalRequest(); } catch (_) {}
 
     // LOOP: Coba satu per satu modelnya
     for (let modelName of MODEL_CHAIN) {

@@ -4,6 +4,10 @@ const knowledgeController = require('../controllers/knowledge.controller');
 const { uploadExcel } = require('../middlewares/upload.middleware');
 const multer = require('multer');
 const uploadRaw = multer({ storage: multer.memoryStorage() });
+const { requireAuth } = require('../middlewares/auth.middleware');
+
+// [SECURITY] Basis pengetahuan (FAQ/aktivitas/template) hanya untuk admin.
+router.use(requireAuth);
 
 // FAQ Routes
 router.post('/faqs', knowledgeController.createFaq);

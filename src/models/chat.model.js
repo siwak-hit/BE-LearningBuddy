@@ -18,11 +18,22 @@ const chatModel = {
   },
 
   async getHistory(sessionId) {
-    return supabaseService.findMany('chat_messages', { session_id: sessionId });
+    // Ambil hanya kolom yang dipakai UI riwayat chat, urut kronologis.
+    return supabaseService.findMany('chat_messages', { session_id: sessionId }, {
+      select: 'id, role, message, intent, context_used, created_at',
+      orderBy: 'created_at',
+      ascending: true
+    });
   },
 
   async getSessionById(sessionId) {
-    return supabaseService.findById('chat_sessions', sessionId);
+    // Kolom yang benar-benar dipakai oleh chat service & controller.
+    // Catatan: tabel chat_sessions memakai started_at/ended_at (BUKAN created_at).
+    return supabaseService.findById(
+      'chat_sessions',
+      sessionId,
+      'id, project_id, session_key, source_url, page_context, course_context, student_alias, started_at, ended_at'
+    );
   },
 
   async updateSession(sessionId, updateData) {

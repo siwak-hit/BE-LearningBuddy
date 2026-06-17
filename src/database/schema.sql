@@ -273,3 +273,34 @@ CREATE TABLE public.moodle_configs (
   CONSTRAINT moodle_configs_pkey PRIMARY KEY (id),
   CONSTRAINT moodle_configs_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
 );
+CREATE TABLE public.student_notes (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  session_id uuid,
+  student_email text,
+  student_name text,
+  class_code text,
+  title text NOT NULL,
+  content text NOT NULL,
+  is_deleted boolean NOT NULL DEFAULT false,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT student_notes_pkey PRIMARY KEY (id),
+  CONSTRAINT student_notes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
+);
+CREATE TABLE public.student_session_registry (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  student_email text NOT NULL,
+  class_code text NOT NULL,
+  student_name text,
+  moodle_user_id bigint,
+  course_id bigint,
+  course_title text,
+  is_deleted boolean NOT NULL DEFAULT false,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT student_session_registry_pkey PRIMARY KEY (id),
+  CONSTRAINT student_session_registry_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id)
+);

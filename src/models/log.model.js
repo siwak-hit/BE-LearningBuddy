@@ -1,5 +1,10 @@
 const { supabaseAdmin } = require('../config/supabase.config');
 
+// [SECURITY] Bersihkan karakter struktural PostgREST + wildcard ilike agar
+// keyword pencarian tidak bisa menyuntik filter tambahan ke `.or(...)`/`.ilike()`.
+const sanitizeLikeTerm = (value = '') =>
+  String(value || '').replace(/[,()\\:%_]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+
 const isValidUUID = (id) => {
   if (id === undefined || id === null) return false;
   const text = String(id).trim();
@@ -160,11 +165,12 @@ const LogModel = {
     let sessionIds = new Set();
     let hasFilter = false;
 
-    if (q) {
+    const safeQ = sanitizeLikeTerm(q);
+    if (safeQ) {
       hasFilter = true;
 
       // 1. Cari keyword pada isi pesan (tabel chat_messages)
-      const { data: msgData } = await supabaseAdmin.from('chat_messages').select('session_id').ilike('message', `%${q}%`);
+      const { data: msgData } = await supabaseAdmin.from('chat_messages').select('session_id').ilike('message', `%${safeQ}%`);
       if (msgData) {
         msgData.forEach(d => { if (isValidUUID(d.session_id)) sessionIds.add(d.session_id); });
       }
@@ -173,7 +179,7 @@ const LogModel = {
       const { data: sessionData } = await supabaseAdmin
         .from('chat_sessions')
         .select('id')
-        .or(`student_alias.ilike.%${q}%,session_key.ilike.%${q}%`);
+        .or(`student_alias.ilike.%${safeQ}%,session_key.ilike.%${safeQ}%`);
 
       if (sessionData) {
         sessionData.forEach(d => { if (isValidUUID(d.id)) sessionIds.add(d.id); });

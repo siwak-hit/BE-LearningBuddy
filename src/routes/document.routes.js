@@ -2,7 +2,10 @@ const express = require('express');
 const router = express.Router();
 const documentController = require('../controllers/document.controller');
 const { uploadDocument } = require('../middlewares/upload.middleware');
+const { requireAuth } = require('../middlewares/auth.middleware');
 
+// [SECURITY] Pengelolaan dokumen materi hanya untuk admin.
+router.use(requireAuth);
 
 // Routes Dokumen
 router.post('/upload', uploadDocument.single('file'), documentController.uploadDocument);
