@@ -126,7 +126,10 @@ const LogService = {
          safeContext = {
            results_count: parsed?.results_count || 0,
            top_sources: parsed?.top_sources || [],
-           element_info: parsed?.element_info || null
+           element_info: parsed?.element_info || null,
+           // [v0.9.6] Dibutuhkan FE untuk memberi label "Jawaban AI" vs "Jawaban Sistem".
+           response_source: parsed?.response_source || null,
+           used_model: parsed?.used_model || null
          };
       }
 
