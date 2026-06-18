@@ -1694,7 +1694,7 @@ function isAiFollowupPrompt(message = '', forceAI = false) {
 // FUNGSI UTAMA
 
 const chatService = {
-  async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null, mention = null }) {
+  async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null, mention = null, freshMention = false }) {
     const session = await chatModel.getSessionById(sessionId);
     let pageContextState = safeParseObject(session.page_context, {});
 
@@ -1847,8 +1847,12 @@ const chatService = {
     // Panduan ini murni memakai screenshot di FE/public/DETAIL.
     // Kalau user klik "Belum jelas, jelaskan dengan AI", forceAI=true sehingga jalur AI tetap berjalan.
     // ==========================================
+    // [v0.9.8] Jika ada mention @materi, JANGAN ambil jalur tutorial statis —
+    // walau intent terdeteksi "kuis/tugas" (mis. "buat 3 soal"), permintaan @materi
+    // harus diproses oleh handler mention (cache-first → AI dari isi materi).
+    const hasMateriMention = mention?.type === 'materi' && (mention.documentId || mention.title || mention.sourceUrl || mention.url || mention.label);
     const staticTutorialKey = resolveStaticTutorialKey(detectedIntent, effectiveMessage);
-    if (staticTutorialKey && !forceAI) {
+    if (staticTutorialKey && !forceAI && !hasMateriMention) {
       const staticGuide = buildStaticTutorialChatResponse({
         studentName,
         tutorialKey: staticTutorialKey,
@@ -1982,11 +1986,24 @@ const chatService = {
         const cacheCtxHash = `mention:${docKey}`;
         const normalizedQ = mentionTask ? `${mentionTask} materi ${docKey}` : aiResponseCacheModel.normalizeQuestion(cleanQ);
         const mentionCacheKey = aiResponseCacheModel.buildCacheKey(projectId, normalizedQ, cacheCtxHash);
-        const mentionActions = () => buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ);
+        // [v0.9.8] Tombol "buat yang baru" per task — minta hasil berbeda dgn konteks sama.
+        const REGEN = {
+          summary: { label: 'Rangkum versi lain', prompt: 'Rangkum lagi materi ini dengan ringkasan yang berbeda' },
+          keypoints: { label: 'Poin penting lainnya', prompt: 'Sebutkan poin penting lain dari materi ini' },
+          simplify: { label: 'Jelaskan dengan cara lain', prompt: 'Jelaskan lagi materi ini dengan analogi/cara yang berbeda' },
+          quiz: { label: 'Buat soal lain', prompt: 'Buat 3 soal latihan baru yang berbeda dari materi ini' }
+        };
+        const mentionActions = () => {
+          const base = buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ);
+          if (mentionTask && REGEN[mentionTask] && mention.token) {
+            base.push({ type: 'mention_regenerate', label: REGEN[mentionTask].label, token: mention.token, prompt: REGEN[mentionTask].prompt });
+          }
+          return base;
+        };
 
-        // 1) CACHE-FIRST.
+        // 1) CACHE-FIRST (dilewati saat user minta hasil baru / freshMention).
         try {
-          const cached = await aiResponseCacheModel.findByKey(projectId, mentionCacheKey);
+          const cached = freshMention ? null : await aiResponseCacheModel.findByKey(projectId, mentionCacheKey);
           if (cached?.answer) {
             aiResponseCacheModel.incrementHit(cached.id).catch(() => {});
             const cachedActions = mentionActions();
