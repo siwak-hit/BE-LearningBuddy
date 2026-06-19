@@ -161,7 +161,9 @@ const externalLoaderService = {
       // [v0.9.9] Digeser ke kiri dari pojok kanan (24px → 96px) agar tidak menimpa
       // widget bawaan LMS yang juga ada di pojok kanan bawah.
       '  right: 96px;',
-      '  bottom: 24px;',
+      // [v0.9.25] Dinaikkan sedikit (24→34px) agar sejajar dengan tombol bundar bawaan
+      // LMS (accessibility / back-to-top) di pojok kanan bawah.
+      '  bottom: 34px;',
       '  z-index: 999999;',
       '  border: none;',
       '  border-radius: 9999px;',
@@ -180,7 +182,7 @@ const externalLoaderService = {
       '}',
       '.alb-ext-launcher-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.18); }',
       '.alb-ext-launcher-btn:disabled { opacity: 0.72; cursor: not-allowed; transform: none; }',
-      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 84px; bottom: 16px; padding: 11px 16px; font-size: 14px; } }'
+      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 84px; bottom: 24px; padding: 11px 16px; font-size: 14px; } }'
     ].join('\\n');
 
     document.head.appendChild(style);
