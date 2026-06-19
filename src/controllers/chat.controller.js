@@ -631,6 +631,74 @@ const chatController = {
     return response.success(res, 'Hasil sengketa kuis', { ok: r.ok === true, reason: r.reason || null, debug: r.debug || null, botMessage: { message, actions } }, 200);
   }),
 
+  // [v0.9.26 #A] Daftar siswa terdaftar (enrolled) di course sesi — untuk dropdown fallback
+  // saat nama tak terbaca dari widget. Siswa memilih dirinya → kita dapat moodle_user_id BENAR.
+  getCourseStudents: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const projectId = session.project_id;
+    const pageCtx = session.page_context || {};
+    const meta = pageCtx.session_meta || {};
+    const courseCtx = session.course_context || {};
+    const classCode = lmsContextService.getClassCodeFromSession(session);
+    let courseId = meta.course_id || courseCtx.course_id || pageCtx.course_id || null;
+    if (!courseId && classCode) {
+      try { const route = await lmsRouteModel.findCourseRoute(projectId, classCode); courseId = route?.course_id || null; } catch (_) {}
+    }
+    if (!courseId) return response.success(res, 'Course belum terdeteksi', { course_id: null, students: [] }, 200);
+
+    let users = [];
+    try { users = await moodleService.getEnrolledUsers(projectId, courseId); }
+    catch (e) { console.warn('[CourseStudents] getEnrolledUsers gagal:', e.message); return response.success(res, 'Gagal memuat peserta', { course_id: courseId, students: [] }, 200); }
+
+    const isStudent = (u) => {
+      const roles = Array.isArray(u.roles) ? u.roles : [];
+      if (!roles.length) return true; // tak ada info role → ikutkan
+      return roles.some((r) => /student|siswa/i.test(String(r.shortname || r.name || '')));
+    };
+    const students = (Array.isArray(users) ? users : [])
+      .filter(isStudent)
+      .map((u) => ({
+        id: u.id,
+        fullname: u.fullname || [u.firstname, u.lastname].filter(Boolean).join(' ').trim() || ('Siswa ' + u.id),
+        email: u.email || ''
+      }))
+      .filter((u) => u.id && u.fullname)
+      .sort((a, b) => String(a.fullname).localeCompare(String(b.fullname)));
+
+    return response.success(res, 'Daftar siswa course', { course_id: courseId, students }, 200);
+  }),
+
+  // [v0.9.26 #A] Set identitas siswa pada sesi (dipakai form fallback nama).
+  identifyStudent: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    const { moodle_user_id, display_name, email, course_id, class_code } = req.body || {};
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const pageCtx = session.page_context || {};
+    const meta = { ...(pageCtx.session_meta || {}) };
+    if (moodle_user_id != null && moodle_user_id !== '') meta.moodle_user_id = moodle_user_id;
+    if (email) meta.email = email;
+    if (display_name) meta.display_name = display_name;
+    if (course_id != null && course_id !== '') meta.course_id = course_id;
+    if (class_code) meta.class_code = class_code;
+    meta.identity_source = 'manual_fallback';
+
+    const newPageCtx = { ...pageCtx, session_meta: meta };
+    await chatModel.updateSession(sessionId, {
+      page_context: newPageCtx,
+      student_alias: display_name || session.student_alias
+    });
+    return response.success(res, 'Identitas siswa diperbarui', { session_meta: meta }, 200);
+  }),
+
   getHistory: asyncHandler(async (req, res) => {
     const { sessionId } = req.params;
     const history = await chatModel.getHistory(sessionId);

@@ -452,6 +452,20 @@ const AMBIGUITY_GROUPS = [
       { intent: 'cek_aktivitas_course', label: '📚 Lihat aktivitas course', prompt: 'aktivitas apa aja di course ini?' },
       { intent: 'cek_deadline_terdekat', label: '🗓️ Cek tugas/deadline terdekat', prompt: 'deadline terdekat aku apa aja?' }
     ]
+  },
+  {
+    // [v0.9.28 #5] "kuis 3 kok nilainya jelek" — kabur antara mau KOMPLAIN nilai/jawaban,
+    // atau cuma mau cek kuis lain / belajar lagi.
+    test: (m) =>
+      hasAny(m, [/\b(kuis|quis|quiz|ujian|ulangan)\b/]) &&
+      hasAny(m, [/\b(nilai|nilainya|skor|hasil|hasilnya|poin|nilaiku)\b/]) &&
+      hasAny(m, [/\b(jelek|jelekk|rendah|buruk|kecil|turun|anjlok|parah|kok)\b/]),
+    question: 'Aku turut prihatin soal nilainya 😟. Kamu mau aku bantu yang mana?',
+    candidates: [
+      { intent: 'komplain', label: '📣 Komplain nilai/jawaban kuis', prompt: 'aku mau komplain soal nilai kuisku' },
+      { intent: 'cek_quiz_belum_dikerjakan', label: '🧪 Lihat kuis yang belum dikerjakan', prompt: 'kuis apa aja yang belum aku kerjakan?' },
+      { intent: 'daftar_materi', label: '📚 Pelajari ulang materinya', prompt: 'ada materi apa aja di course ini?' }
+    ]
   }
 ];
 

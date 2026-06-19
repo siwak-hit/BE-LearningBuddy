@@ -286,7 +286,9 @@ function buildPaginationControls(tableId = '', totalPages = 1, totalRows = 0) {
   const pageSize = 5;
   const showing = Math.min(totalRows, pageSize);
 
-  if (totalPages <= 1) {
+  // [v0.9.27 #3] Tetap render kontrol bila MOBILE butuh paginasi (1/halaman) walau desktop
+  // cuma 1 halaman. FE (events.js) yang menyesuaikan max & status tombol per viewport.
+  if (totalPages <= 1 && totalRows <= 1) {
     return `<div style="font-size:11px;color:#94a3b8;margin-top:8px;padding:0 2px;">Menampilkan ${showing} dari ${totalRows} aktivitas</div>`;
   }
 
@@ -329,10 +331,12 @@ function buildActivityTable(activities = [], options = {}) {
   }).join('');
 
   // --- Mobile card rows ---
+  // [v0.9.27 #3] Di MOBILE tampilkan 1 card per halaman (paginasi `data-alb-mpage`),
+  // beda dari desktop (5/halaman `data-alb-page`).
   const cardRows = activities.map((act, index) => {
-    const page = Math.floor(index / pageSize) + 1;
+    const mpage = index + 1;
     const modalId = `${tableId}_m_${index}`;
-    const hiddenStyle = page > 1 ? 'display:none;' : '';
+    const hiddenStyle = mpage > 1 ? 'display:none;' : '';
     const locked = isLockedStatus(act);
     const activityUrl = act.url || act.activity_url || '';
     const courseUrl = act.course_url || act.action_url || activityUrl || '';
@@ -347,7 +351,7 @@ function buildActivityTable(activities = [], options = {}) {
       : 'Belum ada deadline';
 
     return `
-    <div data-alb-page="${page}" style="${hiddenStyle}background:#fff;border:1px solid #e8ecf0;border-radius:16px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.06);">
+    <div data-alb-mpage="${mpage}" style="${hiddenStyle}background:#fff;border:1px solid #e8ecf0;border-radius:16px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.06);">
 
       <!-- Card header: title + type badge -->
       <div style="padding:14px 14px 0 14px;">
@@ -382,22 +386,18 @@ function buildActivityTable(activities = [], options = {}) {
         <span>${escapeHtml(act.availability_info).slice(0, 160)}</span>
       </div>` : ''}
 
-      <!-- Action buttons row -->
+      <!-- Action buttons row — [v0.9.27 #3] mobile cukup 2 tombol: Lihat di VClass (tab baru) + info -->
       <div style="padding:12px 14px 14px 14px;display:flex;align-items:center;gap:8px;">
         ${hasUrl ? `
-          <button type="button" class="btn-return-source alb-btn-vclass-primary" data-url="${url}" data-page-type="${pageType}" data-title="${title}"
-            style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 14px;border-radius:10px;border:0;background:#0f172a;color:#fff;font-size:13px;font-weight:800;cursor:pointer;min-width:0;">
-            <i class="fa-solid fa-eye"></i><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${locked ? 'Lihat di VClass' : actionLabel}</span>
-          </button>
-          <a href="${url}" target="_blank" rel="noopener noreferrer" title="Buka tab baru"
-            style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;border:1px solid #e2e8f0;background:#fff;color:#475569;text-decoration:none;font-size:14px;">
-            <i class="fa-solid fa-up-right-from-square"></i>
+          <a href="${url}" target="_blank" rel="noopener noreferrer" title="${title}"
+            style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 14px;border-radius:10px;border:0;background:#0f172a;color:#fff;font-size:13px;font-weight:800;text-decoration:none;min-width:0;">
+            <i class="fa-solid fa-up-right-from-square"></i><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Lihat di VClass</span>
           </a>` : `
-          <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 14px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;color:#94a3b8;font-size:13px;font-weight:600;">
+          <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 14px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;color:#94a3b8;font-size:13px;font-weight:600;">
             <i class="fa-solid fa-link-slash"></i> Belum ada link
           </span>`}
         <button type="button" onclick="event.stopPropagation(); var m=document.getElementById('${modalId}'); if(m) m.style.display='flex';"
-          style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;color:#475569;font-size:14px;cursor:pointer;" title="Lihat detail">
+          style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:46px;height:46px;border-radius:10px;border:1px solid #e2e8f0;background:#f8fafc;color:#475569;font-size:15px;cursor:pointer;" title="Lihat detail">
           <i class="fa-solid fa-circle-info"></i>
         </button>
         ${buildActivityDetailModal(act, modalId)}
@@ -419,7 +419,7 @@ function buildActivityTable(activities = [], options = {}) {
         .alb-lms-th{padding:10px 14px;font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;background:#f8fafc;}
         .alb-lms-table tr:hover td{background:#fafbfc;}
       </style>
-      <div class="alb-lms-outer" data-alb-lms-table="${tableId}" data-page="1" data-total-pages="${totalPages}">
+      <div class="alb-lms-outer" data-alb-lms-table="${tableId}" data-page="1" data-mpage="1" data-total-pages="${totalPages}" data-total-mpages="${totalRows}">
 
         <!-- Desktop table -->
         <div class="alb-lms-desktop" style="border:1px solid #e8ecf0;border-radius:16px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06);">

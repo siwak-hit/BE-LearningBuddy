@@ -1168,7 +1168,7 @@ function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', e
       ...videoAction,
       {
         type: 'ask_ai',
-        label: 'Belum jelas, jelaskan dengan AI',
+        label: 'Tanya AI',
         payload: {
           original_message: effectiveMessage,
           message: buildAiFollowupPromptForTutorial(tutorial, effectiveMessage),
@@ -2814,7 +2814,7 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
         const actions = [
           {
             type: 'ask_ai',
-            label: 'Belum jelas, jelaskan dengan AI',
+            label: 'Tanya AI',
             payload: {
               original_message: effectiveMessage,
               message: effectiveMessage,
