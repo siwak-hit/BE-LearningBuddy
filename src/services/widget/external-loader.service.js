@@ -163,7 +163,7 @@ const externalLoaderService = {
       '  right: 96px;',
       // [v0.9.25] Dinaikkan sedikit (24→34px) agar sejajar dengan tombol bundar bawaan
       // LMS (accessibility / back-to-top) di pojok kanan bawah.
-      '  bottom: 39px;',
+      '  bottom: 34px;',
       '  z-index: 999999;',
       '  border: none;',
       '  border-radius: 9999px;',
@@ -182,7 +182,7 @@ const externalLoaderService = {
       '}',
       '.alb-ext-launcher-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.18); }',
       '.alb-ext-launcher-btn:disabled { opacity: 0.72; cursor: not-allowed; transform: none; }',
-      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 84px; bottom: 24px; padding: 11px 16px; font-size: 14px; } }'
+      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 84px; bottom: 29px; padding: 11px 16px; font-size: 14px; } }'
     ].join('\\n');
 
     document.head.appendChild(style);
