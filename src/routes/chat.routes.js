@@ -13,6 +13,10 @@ router.get('/ai-usage-global', chatController.getGlobalAiUsage); // [v0.9.1] pem
 router.get('/session/:sessionId', chatController.getSessionById);
 router.get('/history/:sessionId', chatController.getHistory);
 router.get('/session-materials/:sessionId', chatController.getSessionMaterials);
+router.get('/session-activities/:sessionId', chatController.getSessionActivities); // [v0.9.17] dropdown form Komplain
+router.get('/quiz-questions/:sessionId', chatController.getQuizQuestions); // [v0.9.19] preview soal Komplain Kuis
+router.post('/quiz-dispute', chatController.submitQuizDispute); // [v0.9.19] analisis sengketa Komplain Kuis
+router.get('/student-courses/:sessionId', chatController.getStudentCourses); // [v0.9.13] ganti course konteks
 router.get('/ai-usage/:sessionId', chatController.getAiUsage);
 router.post('/unlock', chatController.unlockChat);
 router.get('/state/:sessionId', chatController.getSessionState);

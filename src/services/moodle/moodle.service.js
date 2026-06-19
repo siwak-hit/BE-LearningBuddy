@@ -284,6 +284,11 @@ const moodleService = {
     return moodleService.callByProjectId(projectId, 'core_enrol_get_enrolled_users', { courseid: courseId });
   },
 
+  // [v0.9.13] Daftar course yang diikuti seorang siswa (untuk fitur ganti course konteks).
+  async getUserCourses(projectId, userId) {
+    return moodleService.callByProjectId(projectId, 'core_enrol_get_users_courses', { userid: userId });
+  },
+
   async getActivitiesCompletionStatus(projectId, courseId, userId) {
     return moodleService.callByProjectId(projectId, 'core_completion_get_activities_completion_status', {
       courseid: courseId,
@@ -302,6 +307,14 @@ const moodleService = {
     return moodleService.callByProjectId(projectId, 'mod_quiz_get_user_quiz_attempts', {
       quizid: quizId,
       userid: userId
+    });
+  },
+
+  // [v0.9.14] Review lembar jawaban satu attempt (per-soal: status, html soal+jawaban).
+  // CATATAN: butuh WS function `mod_quiz_get_attempt_review` diaktifkan admin Moodle.
+  async getQuizAttemptReview(projectId, attemptId) {
+    return moodleService.callByProjectId(projectId, 'mod_quiz_get_attempt_review', {
+      attemptid: attemptId
     });
   },
 

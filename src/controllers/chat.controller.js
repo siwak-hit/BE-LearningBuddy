@@ -26,6 +26,102 @@ function isSameJakartaDay(ts) {
   }
 }
 
+// [v0.9.22] Cross-check keterbukaan aktivitas (sesuai spec user): sebuah modul TERBUKA bila
+//   (a) tak punya syarat (availability/availabilityinfo kosong), ATAU
+//   (b) punya syarat TAPI semua aktivitas prasyaratnya sudah selesai (state ∈ [1,2,3]) di
+//       data completion SISWA.
+// `availability` = JSON string Moodle, mis. {"op":"&","c":[{"type":"completion","cm":699,"e":1}]}.
+// cm = -1 artinya "aktivitas tepat sebelumnya" (perlu id modul sebelumnya secara urutan).
+function parseRequiredCmids(availabilityRaw, prevModuleId) {
+  if (!availabilityRaw) return [];
+  let av;
+  try { av = typeof availabilityRaw === 'string' ? JSON.parse(availabilityRaw) : availabilityRaw; }
+  catch (_) { return []; }
+  const cmids = [];
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node.c)) node.c.forEach(walk);
+    if (node.type === 'completion' && node.cm != null) {
+      const cm = Number(node.cm);
+      cmids.push(cm === -1 ? Number(prevModuleId) : cm);
+    }
+  };
+  walk(av);
+  return cmids.filter((x) => x != null && !Number.isNaN(x) && x > 0);
+}
+
+function isCmidComplete(completionByCmid, cmid) {
+  const st = completionByCmid.get(Number(cmid));
+  if (!st) return false;
+  return st.isoverallcomplete === true || [1, 2, 3].includes(Number(st.state));
+}
+
+// Hitung locked untuk satu modul. availabilityInfoText = teks (untuk fallback bila JSON tak ada).
+function computeModuleLocked(mod, prevModuleId, completionByCmid, availabilityInfoText) {
+  const required = parseRequiredCmids(mod.availability, prevModuleId);
+  if (required.length) {
+    // Terkunci bila ADA prasyarat yang belum selesai.
+    return !required.every((cm) => isCmidComplete(completionByCmid, cm));
+  }
+  // Tak ada availability JSON tapi ada teks syarat → tak bisa diverifikasi → anggap terkunci.
+  if (availabilityInfoText) return true;
+  // uservisible=false dari token bukan acuan siswa; abaikan bila tak ada syarat.
+  return false;
+}
+
+// [v0.9.21] Resolusi userId Moodle siswa secara OTORITATIF.
+// Masalah ditemukan: `moodle_user_id` hasil scraping DOM widget bisa KELIRU (mis. 773
+// padahal yang punya attempt = 772) → semua query per-user (attempt kuis, completion
+// materi) balik kosong. Solusi: kalau sesi punya EMAIL, cocokkan ke enrolled users
+// Moodle (`resolveStudentByEmail`) → dapat userId yang benar. Fallback ke id DOM.
+async function resolveStudentUserId(projectId, meta = {}, courseId = null) {
+  let userId = meta.moodle_user_id || null;
+  let source = userId ? 'session_meta' : null;
+  const email = meta.email || null;
+
+  if (email) {
+    try {
+      const r = await moodleService.resolveStudentByEmail(projectId, email, courseId ? { courseId } : {});
+      if (r?.found && r.moodle_user_id) {
+        userId = r.moodle_user_id;
+        if (!courseId && r.course_id) courseId = r.course_id;
+        source = 'email_resolved';
+      }
+    } catch (e) { console.warn('[ResolveUserId] resolveStudentByEmail gagal:', e.message); }
+  }
+  return { userId, courseId, source, email };
+}
+
+// [v0.9.19] Resolusi konteks Moodle siswa dari sesi (untuk endpoint Komplain Kuis).
+async function resolveQuizSessionContext(session) {
+  const projectId = session.project_id;
+  const pageCtx = session.page_context || {};
+  const meta = pageCtx.session_meta || {};
+  const courseCtx = session.course_context || {};
+  const classCode = lmsContextService.getClassCodeFromSession
+    ? lmsContextService.getClassCodeFromSession(session)
+    : null;
+
+  let courseId = meta.course_id || courseCtx.course_id || pageCtx.course_id || null;
+  if (!courseId && classCode) {
+    try {
+      const route = await lmsRouteModel.findCourseRoute(projectId, classCode);
+      courseId = route?.course_id || null;
+    } catch (_) { /* abaikan */ }
+  }
+
+  const resolved = await resolveStudentUserId(projectId, meta, courseId);
+  console.log('[QuizCtx] resolved userId:', JSON.stringify({ domUserId: meta.moodle_user_id || null, email: meta.email || null, finalUserId: resolved.userId, source: resolved.source, courseId: resolved.courseId }));
+
+  return {
+    projectId,
+    courseId: resolved.courseId || courseId,
+    userId: resolved.userId,
+    userIdSource: resolved.source,
+    studentName: meta.display_name || session.student_alias || 'Siswa'
+  };
+}
+
 const chatController = {
   createSession: asyncHandler(async (req, res) => {
     const { projectKey, sourceUrl, courseContext, pageContext, studentAlias, moodleContext } = req.body;
@@ -55,20 +151,29 @@ const chatController = {
       }
     }
 
+    // [v0.9.9] Email siswa (kalau terdeteksi) dipakai untuk menurunkan nama yang manusiawi
+    // sebagai fallback — JAUH lebih baik daripada "Pengunjung #XXX - Kursus: ..." yang
+    // sebenarnya itu judul course (nama guru), bukan nama siswa.
+    const detectedEmail = String(moodleContext?.email || pageContext?.session_meta?.email || '').trim().toLowerCase();
+    const nameFromEmail = (email) => {
+      const local = String(email || '').split('@')[0] || '';
+      const cleaned = local.replace(/[._\-]+/g, ' ').replace(/\d+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!cleaned) return '';
+      return cleaned.split(' ').filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    };
+
     // Pembuatan Display Name Otomatis (Memprioritaskan nama auto-detect dari Moodle)
     let displayName = `Pengunjung #${shortCode}`;
     if (autoStudentName) {
       displayName = autoStudentName;
     } else if (studentAlias) {
       displayName = studentAlias;
-    } else if (pageContext?.heading) {
-      displayName += ` - ${pageContext.heading}`;
-    } else if (pageContext?.title) {
-      displayName += ` - ${pageContext.title}`;
-    } else if (sourceUrl) {
-      const urlObj = new URL(sourceUrl);
-      displayName += ` - ${urlObj.hostname}`;
+    } else if (detectedEmail && nameFromEmail(detectedEmail)) {
+      // Nama dari email, mis. "ilyas.rizal@..." → "Ilyas Rizal".
+      displayName = nameFromEmail(detectedEmail);
     }
+    // Catatan: tidak lagi menambahkan pageContext.heading/title (itu judul course,
+    // bukan identitas siswa) ke nama tampilan.
 
     const sessionMeta = {
       display_name: displayName,
@@ -223,6 +328,39 @@ const chatController = {
     return response.success(res, 'Feedback tercatat', { difficulty }, 200);
   }),
 
+  // [v0.9.13] Daftar COURSE yang diikuti siswa (untuk fitur ganti course konteks).
+  getStudentCourses: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const meta = session.page_context?.session_meta || {};
+    const userId = meta.moodle_user_id;
+    if (!userId) return response.success(res, 'User Moodle belum terdeteksi', [], 200);
+
+    let courses = [];
+    try {
+      courses = await moodleService.getUserCourses(session.project_id, userId);
+    } catch (e) {
+      console.warn('[StudentCourses] getUserCourses gagal:', e.message);
+      return response.success(res, 'Gagal memuat course dari Moodle', [], 200);
+    }
+
+    const currentCourseId = String(meta.course_id || '');
+    const list = (Array.isArray(courses) ? courses : [])
+      .map((c) => ({
+        id: c.id,
+        fullname: c.fullname || c.displayname || c.shortname || `Course ${c.id}`,
+        shortname: c.shortname || '',
+        is_current: String(c.id) === currentCourseId
+      }))
+      .filter((c) => c.id);
+
+    return response.success(res, 'Daftar course siswa', list, 200);
+  }),
+
   // [v0.7.1] Daftar MATERI dari VClass untuk kelas siswa (mention @materi-N).
   // Diambil LANGSUNG dari core_course_get_contents course kelas user, lalu disaring:
   //   - hanya modul materi (page/resource/book/url/folder), bukan tugas/kuis/forum
@@ -268,12 +406,16 @@ const chatController = {
 
     // [v0.7.3] Status penyelesaian materi OLEH SISWA (core_completion_get_activities_completion_status).
     // Hanya materi yang sudah DISELESAIKAN siswa yang masuk daftar @materi.
-    const moodleUserId = meta.moodle_user_id || null;
+    // [v0.9.21] userId otoritatif (email → enrolled users), bukan id DOM yang bisa keliru.
+    const _resolvedUid = await resolveStudentUserId(projectId, meta, courseId);
+    const moodleUserId = _resolvedUid.userId || null;
     const completionByCmid = new Map();
+    let completionTotal = 0; let completionDone = 0;
     if (moodleUserId) {
       try {
         const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, moodleUserId);
         const statuses = Array.isArray(compRes?.statuses) ? compRes.statuses : [];
+        completionTotal = statuses.length;
         statuses.forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
       } catch (e) { console.warn('[SessionMaterials] completion gagal:', e.message); }
     }
@@ -290,29 +432,27 @@ const chatController = {
     });
 
     const materials = [];
+    let prevModuleId = null; // untuk cm:-1 (aktivitas tepat sebelumnya) — dilacak lintas-modul
+    let lockedCount = 0;
     (Array.isArray(sections) ? sections : []).forEach((section) => {
       (section.modules || []).forEach((mod) => {
-        if (!MATERI_MODNAMES.includes(String(mod.modname || '').toLowerCase())) return;
+        const prevForThis = prevModuleId;
+        prevModuleId = Number(mod.id); // update untuk modul berikutnya (urutan course)
+
         if (mod.visible === 0) return; // disembunyikan instruktur
+        if (!MATERI_MODNAMES.includes(String(mod.modname || '').toLowerCase())) return;
         const title = decodeEntities(mod.name);
         if (!title) return;
         const availabilityInfo = stripHtml(mod.availabilityinfo);
-        // PENTING: uservisible/availabilityinfo dari core_course_get_contents itu
-        // perspektif TOKEN (admin), BUKAN siswa. Jadi tidak dipakai sebagai status
-        // kunci siswa kalau kita sudah punya data completion siswa.
-        const tokenLocked = mod.uservisible === false || Boolean(availabilityInfo);
         const completed = isCompleted(completionByCmid.get(Number(mod.id)));
+        if (completed) completionDone += 1;
 
-        // [v0.7.3] Filter: hanya materi yang sudah DISELESAIKAN siswa.
-        // Tanpa identitas Moodle siswa → fallback ke materi yang terbuka (perspektif token).
-        if (moodleUserId) {
-          if (!completed) return;
-        } else if (tokenLocked) {
-          return;
-        }
-
-        // Materi yang sudah diselesaikan PASTI bisa diakses siswa → jangan ditandai terkunci.
-        const locked = moodleUserId ? false : tokenLocked;
+        // [v0.9.22] TAMPILKAN SEMUA materi (sesuai spec user); jangan disaring berdasarkan
+        // gembok. Cross-check: TERBUKA bila tak ada syarat ATAU prasyaratnya sudah selesai
+        // di completion siswa. Yang masih terkunci tetap ditampilkan dengan locked=true
+        // (FE akan men-disable-nya).
+        const locked = computeModuleLocked(mod, prevForThis, completionByCmid, availabilityInfo);
+        if (locked) lockedCount += 1;
 
         const url = mod.url || null;
         const documentId = (url && byUrl.get(url)) || byTitle.get(norm(title)) || null;
@@ -328,7 +468,167 @@ const chatController = {
       });
     });
 
+    console.log('[SessionMaterials] diag:', JSON.stringify({
+      courseId, domUserId: meta.moodle_user_id || null, email: meta.email || null,
+      finalUserId: moodleUserId, userIdSource: _resolvedUid.source,
+      sections: Array.isArray(sections) ? sections.length : 0,
+      completionTotal, completionDone, materialsReturned: materials.length, lockedCount
+    }));
     return response.success(res, 'Materi kelas berhasil diambil', materials, 200);
+  }),
+
+  // [v0.9.17] Daftar AKTIVITAS course (kuis/tugas/forum/materi) untuk dropdown form Komplain.
+  // Diambil sekali via core_course_get_contents lalu dikelompokkan per jenis (modname).
+  // Dipakai FE complaint-builder agar siswa memilih nama aktivitas asli, bukan mengetik bebas.
+  getSessionActivities: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const projectId = session.project_id;
+    const pageCtx = session.page_context || {};
+    const meta = pageCtx.session_meta || {};
+    const courseCtx = session.course_context || {};
+    const classCode = lmsContextService.getClassCodeFromSession(session);
+
+    let courseId = meta.course_id || courseCtx.course_id || pageCtx.course_id || null;
+    if (!courseId && classCode) {
+      try {
+        const route = await lmsRouteModel.findCourseRoute(projectId, classCode);
+        courseId = route?.course_id || null;
+      } catch (_) { /* abaikan */ }
+    }
+    const empty = { Kuis: [], Tugas: [], Materi: [], Forum: [] };
+    if (!courseId) return response.success(res, 'Course belum terdeteksi', empty, 200);
+
+    let sections = [];
+    try {
+      sections = await moodleService.getCourseContents(projectId, courseId);
+    } catch (e) {
+      console.warn('[SessionActivities] getCourseContents gagal:', e.message);
+      return response.success(res, 'Gagal memuat aktivitas dari Moodle', empty, 200);
+    }
+
+    // [v0.9.22] Completion siswa (userId otoritatif) untuk cross-check gembok per aktivitas.
+    const _uid = await resolveStudentUserId(projectId, meta, courseId);
+    const completionByCmid = new Map();
+    if (_uid.userId) {
+      try {
+        const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, _uid.userId);
+        (Array.isArray(compRes?.statuses) ? compRes.statuses : []).forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
+      } catch (e) { console.warn('[SessionActivities] completion gagal:', e.message); }
+    }
+
+    const decodeEntities = (s) => String(s || '')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, ' ').trim();
+    const stripHtml = (s) => decodeEntities(String(s || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+    // modname Moodle → label chip komplain.
+    const TYPE_BY_MODNAME = {
+      quiz: 'Kuis',
+      assign: 'Tugas',
+      forum: 'Forum',
+      page: 'Materi', resource: 'Materi', book: 'Materi', url: 'Materi', folder: 'Materi'
+    };
+    const grouped = { Kuis: [], Tugas: [], Materi: [], Forum: [] };
+    let prevModuleId = null;
+    (Array.isArray(sections) ? sections : []).forEach((section) => {
+      (section.modules || []).forEach((mod) => {
+        const prevForThis = prevModuleId;
+        prevModuleId = Number(mod.id);
+        if (mod.visible === 0) return; // disembunyikan instruktur
+        const type = TYPE_BY_MODNAME[String(mod.modname || '').toLowerCase()];
+        if (!type) return;
+        const title = decodeEntities(mod.name);
+        if (!title) return;
+        const availabilityInfo = stripHtml(mod.availabilityinfo);
+        const locked = computeModuleLocked(mod, prevForThis, completionByCmid, availabilityInfo);
+        const completed = isCmidComplete(completionByCmid, mod.id);
+        grouped[type].push({
+          title, url: mod.url || null, section: decodeEntities(section.name),
+          locked, completed, availability_info: locked ? (availabilityInfo || null) : null
+        });
+      });
+    });
+
+    return response.success(res, 'Aktivitas kelas berhasil diambil', grouped, 200);
+  }),
+
+  // [v0.9.19] Komplain Kuis — daftar soal + jawaban siswa (untuk pilih nomor + preview).
+  getQuizQuestions: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    const quizName = req.query.quiz || req.query.quizName || '';
+    const quizId = req.query.quizId || null;
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const ctx = await resolveQuizSessionContext(session);
+    if (!ctx.userId || !ctx.courseId) {
+      return response.success(res, 'Identitas Moodle belum terbaca', { ok: false, reason: 'no_identity' }, 200);
+    }
+    const result = await chatService.listStudentQuizQuestions({
+      projectId: ctx.projectId, courseId: ctx.courseId, userId: ctx.userId, quizName, quizId
+    });
+    return response.success(res, 'Soal kuis', result, 200);
+  }),
+
+  // [v0.9.19] Komplain Kuis — jalankan analisis sengketa (quizId/nama + slot) → balasan AI.
+  submitQuizDispute: asyncHandler(async (req, res) => {
+    const { sessionId, quiz, quizId, slot } = req.body || {};
+    if (!sessionId || !slot) return response.error(res, 'sessionId & slot diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const ctx = await resolveQuizSessionContext(session);
+    if (!ctx.userId || !ctx.courseId) {
+      const msg = `Hai ${ctx.studentName},\n\nAku belum bisa mengecek karena data Moodle-mu (akun/kelas) belum terbaca. Coba buka ulang AI Buddy dari dalam VClass ya. Kalau tetap, sampaikan langsung ke gurumu.`;
+      return response.success(res, 'no_identity', { botMessage: { message: msg, actions: [] } }, 200);
+    }
+
+    const r = await chatService.analyzeQuizDisputeDirect({
+      projectId: ctx.projectId, courseId: ctx.courseId, userId: ctx.userId,
+      quizName: quiz, quizId, slot, studentName: ctx.studentName
+    });
+
+    const WA_TEACHER = 'https://api.whatsapp.com/send/?phone=628989807094&text=' +
+      encodeURIComponent(`Halo Bu/Pak Guru, saya ${ctx.studentName} mau menanyakan hasil ${quiz || 'kuis'} nomor ${slot}.`);
+
+    let message; let actions = [];
+    if (r.ok) {
+      message = `Hai ${ctx.studentName},\n\n${r.message}`;
+      if (r.reviewHtml) actions.push({ type: 'open_html_view', label: '🔍 Lihat soal & jawabanmu', html: r.reviewHtml, title: `${r.quizName} — No. ${slot}` });
+    } else if (r.reason === 'not_attempted') {
+      message = `Hai ${ctx.studentName},\n\nSepertinya kamu **belum menyelesaikan** ${r.quizName || 'kuis ini'}, jadi belum ada jawaban yang bisa aku cek. Kalau sudah mengerjakan, pastikan sudah ditekan **Selesai/Submit** ya.`;
+    } else if (r.reason === 'review_unavailable' || r.reason === 'attempts_unavailable') {
+      message = `Hai ${ctx.studentName},\n\nAku belum bisa membuka lembar jawaban ${r.quizName || 'kuis'} dari VClass (kemungkinan izin sistem). Untuk hal ini, paling tepat **lapor ke gurumu** ya.`;
+      actions.push({ type: 'wa_teacher', label: '💬 Hubungi Guru via WhatsApp', url: WA_TEACHER });
+    } else if (r.reason === 'quiz_not_found') {
+      message = `Hai ${ctx.studentName},\n\nAku tidak menemukan kuis itu di VClass kelasmu. Coba pilih ulang nama kuisnya ya.`;
+    } else if (r.reason === 'question_not_found') {
+      message = `Hai ${ctx.studentName},\n\nNomor soal itu tidak aku temukan di ${r.quizName || 'kuis'} ini. Coba pilih nomor yang lain.`;
+    } else {
+      message = `Hai ${ctx.studentName},\n\nMaaf, aku belum bisa menyelesaikan pengecekan otomatis kali ini. Coba ulangi sebentar lagi, atau tanyakan ke gurumu ya.`;
+      if (r.reviewHtml) actions.push({ type: 'open_html_view', label: '🔍 Lihat soal & jawabanmu', html: r.reviewHtml, title: `${r.quizName || 'Kuis'} — No. ${slot}` });
+      actions.push({ type: 'wa_teacher', label: '💬 Hubungi Guru via WhatsApp', url: WA_TEACHER });
+    }
+
+    // Catat ke riwayat agar muncul di transkrip & log.
+    try {
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: `Komplain ${quiz || 'kuis'} nomor ${slot} (jawaban dinilai salah)`, intent: 'sengketa_jawaban' });
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message, intent: 'sengketa_jawaban',
+        context_used: { response_source: r.ok ? 'ai' : 'system', used_model: 'sengketa_jawaban_form', actions }
+      });
+    } catch (e) { console.warn('[QuizDispute] persist gagal:', e.message); }
+
+    console.log('[QuizDispute] submit result:', JSON.stringify({ reason: r.reason || 'ok', ctxUser: ctx.userId, ctxCourse: ctx.courseId, debug: r.debug || null }));
+    return response.success(res, 'Hasil sengketa kuis', { ok: r.ok === true, reason: r.reason || null, debug: r.debug || null, botMessage: { message, actions } }, 200);
   }),
 
   getHistory: asyncHandler(async (req, res) => {

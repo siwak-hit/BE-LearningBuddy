@@ -158,7 +158,9 @@ const externalLoaderService = {
     style.innerHTML = [
       '.alb-ext-launcher-btn {',
       '  position: fixed;',
-      '  right: 24px;',
+      // [v0.9.9] Digeser ke kiri dari pojok kanan (24px → 96px) agar tidak menimpa
+      // widget bawaan LMS yang juga ada di pojok kanan bawah.
+      '  right: 96px;',
       '  bottom: 24px;',
       '  z-index: 999999;',
       '  border: none;',
@@ -178,7 +180,7 @@ const externalLoaderService = {
       '}',
       '.alb-ext-launcher-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.18); }',
       '.alb-ext-launcher-btn:disabled { opacity: 0.72; cursor: not-allowed; transform: none; }',
-      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 16px; bottom: 16px; padding: 11px 16px; font-size: 14px; } }'
+      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 84px; bottom: 16px; padding: 11px 16px; font-size: 14px; } }'
     ].join('\\n');
 
     document.head.appendChild(style);
@@ -225,6 +227,23 @@ const externalLoaderService = {
 
         var userMenu = document.querySelector('[data-userid]');
         if (userMenu) ctx.moodle_user_id = userMenu.getAttribute('data-userid');
+
+        // [v0.9.14] Fallback userid dari link profil di menu user (andal di banyak tema Moodle).
+        if (!ctx.moodle_user_id) {
+          var profileLink = document.querySelector('a[href*="/user/profile.php?id="], a[href*="/user/view.php?id="]');
+          if (profileLink) {
+            var pm = profileLink.href.match(/[?&]id=(\\d+)/);
+            if (pm) ctx.moodle_user_id = pm[1];
+          }
+        }
+        // Nama dari "You are logged in as / Anda login sebagai" bila ada.
+        if (!ctx.student_name) {
+          var loginInfo = document.querySelector('.logininfo, .usermenu');
+          if (loginInfo) {
+            var li = loginInfo.innerText.replace(/\\s+/g, ' ').match(/(?:logged in as|login sebagai|masuk sebagai)\\s+([^.(]+)/i);
+            if (li) ctx.student_name = li[1].trim();
+          }
+        }
       } catch (e) {
         console.error('[AI Buddy] Ekstraksi Moodle context gagal:', e);
       }
@@ -378,9 +397,12 @@ const externalLoaderService = {
     }
 
 
-    function showMiniForm(prefillContext) {
+    function showMiniForm(prefillContext, loggedIn) {
       if (document.getElementById('alb-mini-form-overlay')) return;
       prefillContext = prefillContext || {};
+      var noteHtml = loggedIn
+        ? '<div style="margin:0 0 14px 0;padding:9px 11px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:12px;color:#1e40af;line-height:1.45;"><b>Kamu sudah login di VClass.</b> Tapi data akunmu belum terbaca otomatis — masukkan email Moodle-mu ya.</div>'
+        : '<div style="margin:0 0 14px 0;padding:9px 11px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;font-size:12px;color:#92400e;line-height:1.45;"><b>Kamu belum login di VClass.</b> Login dulu supaya bisa terdeteksi otomatis, atau lanjut dengan memasukkan email Moodle-mu.</div>';
       var prefillEmail = prefillContext.email || '';
       var prefillCourseId = prefillContext.course_id || getCourseIdFromUrl(window.location.href) || null;
 
@@ -536,7 +558,8 @@ const externalLoaderService = {
       overlay.innerHTML = [
         '<div style="background:#fff;padding:24px;border-radius:16px;width:92%;max-width:380px;box-shadow:0 10px 25px rgba(0,0,0,0.2);font-family:Inter, system-ui, sans-serif;">',
         '  <h3 style="margin:0 0 6px 0;font-size:18px;color:#1a1a1a;font-weight:700;">Mulai Sesi Belajar</h3>',
-        '  <p style="margin:0 0 16px 0;font-size:13px;color:#666;line-height:1.5;">Masukkan email Moodle dulu. Setelah email terdeteksi, pilihan kelas akan muncul sesuai course yang kamu ikuti.</p>',
+        '  <p style="margin:0 0 12px 0;font-size:13px;color:#666;line-height:1.5;">Masukkan email Moodle dulu. Setelah email terdeteksi, pilihan kelas akan muncul sesuai course yang kamu ikuti.</p>',
+        noteHtml,
         '  <label style="display:block;font-size:12px;color:#444;font-weight:700;margin-bottom:6px;">Email Moodle</label>',
         '  <div style="display:flex;gap:8px;margin-bottom:12px;">',
         '    <input id="alb-input-email" type="email" value="' + escapeHtmlInline(prefillEmail) + '" placeholder="Email Moodle kamu" style="flex:1;min-width:0;padding:10px 12px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;"">',
@@ -707,14 +730,9 @@ const externalLoaderService = {
       ctx.page_activities = extractCoursePageActivities();
       var isLoggedIn = checkMoodleLoginStatus();
 
-      if (!isLoggedIn) {
-        btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
-        btn.disabled = false;
-        showNotLoggedInAlert();
-        return;
-      }
-
-      if ((ctx.email || ctx.moodle_user_id) && ctx.course_id) {
+      // [v0.9.14] Sudah login + data user & course terbaca → langsung auto ke AIworkspace.
+      // Kalau belum login ATAU data belum terbaca → tampilkan form (dengan catatan kontekstual).
+      if (isLoggedIn && (ctx.email || ctx.moodle_user_id) && ctx.course_id) {
         fetchWithTimeout(apiBase + '/api/chat/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -739,19 +757,19 @@ const externalLoaderService = {
             var targetUrl = appUrl + '/buddy?projectKey=' + encodeURIComponent(projectKey) + '&sessionId=' + encodeURIComponent(res.data.session.id) + '&mode=external';
             window.open(targetUrl, 'alb_ai_workspace');
           } else {
-            showMiniForm(ctx);
+            showMiniForm(ctx, isLoggedIn);
           }
         })
         .catch(function(err) {
           console.error('[AI Buddy] Auto session gagal (CORS/Network):', err);
           btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
           btn.disabled = false;
-          showMiniForm(ctx);
+          showMiniForm(ctx, isLoggedIn);
         });
       } else {
         btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
         btn.disabled = false;
-        showMiniForm(ctx);
+        showMiniForm(ctx, isLoggedIn);
       }
     };
 

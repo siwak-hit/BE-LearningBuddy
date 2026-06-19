@@ -16,15 +16,29 @@ const ALLOWED_INTENTS = [
   // --- LMS INTENTS BARU ---
   'cek_tugas_belum_selesai', 'cek_deadline_hari_ini', 'cek_deadline_terdekat',
   'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_aktivitas_course',
-  'cek_pengajar_course', 'cek_course_saya', 'buka_aktivitas', 'tanya_password'
+  'cek_pengajar_course', 'cek_course_saya', 'buka_aktivitas', 'tanya_password',
+  'daftar_materi', 'sengketa_jawaban',
+  'cek_status_tugas', 'cek_status_completion', 'evaluasi_jawaban_tugas', 'komplain'
 ];
 
-const normalizeText = (value = '') => String(value || '')
-  .toLowerCase()
-  .replace(/log\s*in/g, 'login')
-  .replace(/[^a-z0-9\u00c0-\u024f\s]+/gi, ' ')
-  .replace(/\s+/g, ' ')
-  .trim();
+// [v0.9.15] Kata pengisi di AKHIR kalimat yang TIDAK mengubah maksud. Distrip agar
+// "...benar" dan "...benar gimana tuh?" terdeteksi SAMA (intent lebih stabil).
+const TRAILING_FILLER = /\s+(?:gimana tuh|gimana dong|gimana sih|gimana ya|bagaimana tuh|gimana|bagaimana|tuh|dong|sih|nih|deh|ya|yaa|kak|min|bang|kok|ya kan|kan)$/;
+
+const normalizeText = (value = '') => {
+  let s = String(value || '')
+    .toLowerCase()
+    .replace(/log\s*in/g, 'login')
+    .replace(/[^a-z0-9\u00c0-\u024f\s]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (let i = 0; i < 4; i += 1) {
+    const next = s.replace(TRAILING_FILLER, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+};
 
 const hasAny = (text, patterns = []) => patterns.some((pattern) => {
   if (pattern instanceof RegExp) return pattern.test(text);
@@ -73,6 +87,17 @@ function ruleBasedDetect(message = '', elementContext = null) {
     return 'cek_quiz_belum_dikerjakan';
   }
 
+  // [v0.9.15] KASUS 1: siswa MENGAKU sudah mengumpulkan tugas tapi status masih belum.
+  // Harus sebelum cek_tugas_belum_selesai (yg untuk "tugas APA yang belum dikerjakan").
+  if (
+    hasAny(msg, [/\b(tugas|assignment|file|pekerjaan)\b/]) &&
+    hasAny(msg, [/\b(sudah|udah|telah|barusan|tadi|kemarin)\b/]) &&
+    hasAny(msg, [/\b(upload|unggah|submit|kumpul|kumpulin|kumpulkan|kirim|ngumpulin|mengumpulkan|ngirim)\b/]) &&
+    hasAny(msg, [/\b(belum|masih|kok|kenapa|gak|nggak|tidak)\b/])
+  ) {
+    return 'cek_status_tugas';
+  }
+
   // Tugas/assignment yang belum selesai / belum dikumpulkan.
   if (
     hasAny(msg, [/\b(tugas|assignment|pengumpulan)\b/]) &&
@@ -93,6 +118,52 @@ function ruleBasedDetect(message = '', elementContext = null) {
   // Deadline terdekat / jadwal tugas.
   if (hasAny(msg, [/\b(deadline|tenggat|batas waktu|jatuh tempo|jadwal tugas|tugas terdekat|deadline terdekat)\b/])) {
     return 'cek_deadline_terdekat';
+  }
+
+  // [v0.9.9] "Ada materi apa aja / daftar materi" → list materi (BUKAN penjelasan konsep).
+  // Diletakkan lebih awal agar tak tertangkap navigasi_kursus / penjelasan_materi.
+  if (hasAny(msg, [/\b(materi apa aja|materi apa saja|ada materi apa|daftar materi|list materi|materi apa yang ada|materi apa di|materi nya apa|materinya apa aja)\b/])) {
+    return 'daftar_materi';
+  }
+
+  // [v0.9.14] Sengketa jawaban kuis: siswa merasa jawaban/kunci kuis salah padahal
+  // menurut materi benar. Ditaruh sebelum bantuan_kuis agar "kuis" tak menangkapnya.
+  if (
+    hasAny(msg, [/\b(soal|kuis|quis|quiz|jawaban|nomor|nomer)\b/]) &&
+    hasAny(msg, [/\b(salah|keliru|kurang tepat|tidak sesuai|gak sesuai|nggak sesuai)\b/]) &&
+    hasAny(msg, [/\b(padahal|menurut materi|harusnya|seharusnya|sebenarnya|mestinya|sudah benar|udah bener|udah benar)\b/])
+  ) {
+    return 'sengketa_jawaban';
+  }
+
+  // [v0.9.15] KASUS 3: evaluasi jawaban tugas yang dinilai OOT/salah konsep.
+  // Paling spesifik → cek sebelum cek_status_tugas & bantuan_tugas.
+  if (
+    hasAny(msg, [/\b(tugas|jawaban|teks jawaban|essay|esai)\b/]) &&
+    hasAny(msg, [/\b(oot|out of topic|salah konsep|melenceng|dibilang salah|dianggap salah|kenapa salah|salahnya di ?mana|salah nya di ?mana|kurang tepat)\b/])
+  ) {
+    return 'evaluasi_jawaban_tugas';
+  }
+
+  // [v0.9.15] KASUS 2: aktivitas/forum sudah dikerjakan tapi belum centang hijau/selesai.
+  if (
+    hasAny(msg, [/\b(forum|diskusi|komen|komentar|balas|reply|aktivitas|materi|tugas|kuis|quiz)\b/]) &&
+    hasAny(msg, [/\b(belum|gak|nggak|tidak|kok|kenapa|ga)\b/]) &&
+    hasAny(msg, [/\b(centang|centang hijau|ceklis|ceklist|selesai|komplit|complete|tuntas|kelar|beres)\b/])
+  ) {
+    return 'cek_status_completion';
+  }
+
+  // [v0.9.17] Komplain SAMAR (bukan kasus spesifik di atas). Kasus jelas seperti
+  // "jawaban kuis salah padahal benar" / "udah upload tapi belum masuk" sudah ditangani
+  // intent spesifik di atas (sengketa_jawaban / cek_status_*). Sisanya yang sekadar
+  // "aku mau komplain / ini gak adil / nggak terima" → arahkan ke template komplain.
+  if (hasAny(msg, [
+    /\b(komplain|komplen|protes|keberatan)\b/,
+    /\b(tidak|gak|ga|nggak)\s+(adil|terima|setuju)\b/,
+    /\bmau\s+lapor(kan)?\b/
+  ])) {
+    return 'komplain';
   }
 
   // Pertanyaan umum "ada tugas?" lebih aman masuk ke pengecekan tugas,
@@ -341,7 +412,57 @@ const intentService = {
   },
 
   _ruleBasedDetect: ruleBasedDetect,
-  _stripFeedbackPrefix: stripFeedbackPrefix
+  _stripFeedbackPrefix: stripFeedbackPrefix,
+  detectAmbiguousIntent
 };
+
+// [v0.9.24] DISAMBIGUASI INTENT. Daripada memaksa tebak intent saat pertanyaan ambigu,
+// tawarkan ke siswa maks 4 pilihan. Saat diklik, FE kirim ulang dgn INTENT EKSPLISIT
+// (didukung sejak v0.9.22) → langsung ke handler yang benar. Trigger SENGAJA konservatif:
+// hanya pola yang memang kabur, supaya pertanyaan jelas tetap diproses otomatis.
+const AMBIGUITY_GROUPS = [
+  {
+    // "hari senin harus ngerjain apa", "apa aja yang harus aku kerjakan", "to-do ku apa",
+    // "besok ngapain aja" — kabur antara deadline / tugas / kuis / aktivitas.
+    test: (m) =>
+      hasAny(m, [
+        /\b(apa aja|apa saja|ngapain|apa yang harus|yang harus (di)?kerja|harus (ku|aku|saya)?\s?(kerjakan|ngerjain|dikerjakan)|to ?do|to-?do|ada apa aja)\b/
+      ]) &&
+      // bukan pertanyaan "cara/jelaskan"
+      !hasAny(m, [/\b(cara|gimana|bagaimana|jelaskan|apa itu|pengertian|maksud)\b/]) &&
+      // jangan picu kalau SUDAH menyebut SATU jenis aktivitas spesifik (sudah tak ambigu)
+      !hasAny(m, [/\b(tugas|kuis|quiz|forum|diskusi|materi)\b/]),
+    question: 'Hmm, pertanyaanmu bisa beberapa maksud nih 🤔. Yang mana yang kamu maksud? Pilih salah satu ya:',
+    candidates: [
+      { intent: 'cek_deadline_terdekat', label: '🗓️ Cek deadline terdekat', prompt: 'deadline terdekat aku apa aja?' },
+      { intent: 'cek_tugas_belum_selesai', label: '📝 Tugas yang belum selesai', prompt: 'tugas apa aja yang belum aku kerjakan?' },
+      { intent: 'cek_quiz_belum_dikerjakan', label: '🧪 Kuis yang belum dikerjakan', prompt: 'kuis apa aja yang belum aku kerjakan?' },
+      { intent: 'cek_aktivitas_course', label: '📚 Semua aktivitas di course', prompt: 'aktivitas apa aja di course ini?' }
+    ]
+  },
+  {
+    // "aku mau belajar", "bantu aku dong", "mulai dari mana" — kabur antara lihat daftar
+    // materi / minta dijelaskan / panduan umum.
+    test: (m) =>
+      hasAny(m, [/\b(mau belajar|pengen belajar|mulai (dari mana|belajar)|bantu (aku|saya) belajar|aku bingung mau ngapain)\b/]) &&
+      !hasAny(m, [/\b(tugas|kuis|quiz|forum|deadline|login|logout|nilai)\b/]),
+    question: 'Siap membantu! 😊 Kamu mau mulai dari mana? Pilih salah satu ya:',
+    candidates: [
+      { intent: 'daftar_materi', label: '📋 Lihat daftar materi', prompt: 'ada materi apa aja di course ini?' },
+      { intent: 'cek_aktivitas_course', label: '📚 Lihat aktivitas course', prompt: 'aktivitas apa aja di course ini?' },
+      { intent: 'cek_deadline_terdekat', label: '🗓️ Cek tugas/deadline terdekat', prompt: 'deadline terdekat aku apa aja?' }
+    ]
+  }
+];
+
+function detectAmbiguousIntent(message = '') {
+  const m = normalizeText(stripFeedbackPrefix(message));
+  if (!m || m.length < 3) return null;
+  for (const group of AMBIGUITY_GROUPS) {
+    try { if (group.test(m)) return { question: group.question, candidates: group.candidates.slice(0, 4) }; }
+    catch (_) { /* abaikan group error */ }
+  }
+  return null;
+}
 
 module.exports = intentService;

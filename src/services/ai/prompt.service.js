@@ -75,11 +75,14 @@ const promptService = {
     } else if (answerMode === 'deadline') {
       modeLine = 'MODE: Ingatkan deadline; pakai DATA LMS bila ada, atau cara cek di Moodle.';
     } else {
-      const related = ['dampak', 'contoh', 'alasan'].includes(materialFocus);
       modeLine = `MODE: Jawab dari KONTEKS MATERI. ${FOCUS_RULES[materialFocus] || FOCUS_RULES.umum}`;
-      if (related) {
-        modeLine += ' Jika hal ini tidak ada langsung di materi, AWALI dengan "Bagian ini belum dijelaskan langsung di materi guru, tapi masih berkaitan." lalu jawab umum, singkat, aman.';
-      }
+      // [v0.9.17] Jangan menolak keras kalau konsep tak persis ada di materi.
+      // Untuk pertanyaan edukatif yang masih relevan (konsep, istilah umum, navigasi/UI,
+      // pengetahuan dasar), boleh jawab umum yang aman & benar — cukup tandai dengan jujur
+      // bahwa ini di luar materi guru. Tetap DILARANG mengarang fakta/angka/data spesifik
+      // (statistik, tanggal, nama) yang tidak ada di materi; untuk itu akui tak tahu &
+      // sarankan tanya guru. Bedakan: "menjelaskan konsep" boleh; "mengarang data" tidak.
+      modeLine += ' Jika hal yang ditanya tidak ada langsung di KONTEKS MATERI tapi masih edukatif & relevan (konsep/istilah/navigasi/pengetahuan umum), AWALI dengan "Ini belum dibahas langsung di materi gurumu ya, tapi aku bantu jelaskan secara umum." lalu jawab ringkas, benar, dan aman. TAPI untuk fakta/angka/statistik/tanggal spesifik yang tak ada di materi: jangan mengarang — akui belum tahu pastinya & sarankan tanya guru.';
     }
 
     // Panjang jawaban menyesuaikan mode yang dipilih user (hemat token saat singkat).

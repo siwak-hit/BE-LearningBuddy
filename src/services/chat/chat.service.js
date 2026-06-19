@@ -15,8 +15,10 @@ const activityModel = require('../../models/activity.model');
 const lmsRouteModel = require('../../models/lmsRoute.model');
 const aiResponseCacheModel = require('../../models/aiResponseCache.model');
 const chunkModel = require('../../models/chunk.model');
+const documentModel = require('../../models/document.model');
 const aiQueueService = require('../ai/aiQueue.service');
 const lmsContextService = require('../moodle/lms-context.service');
+const moodleService = require('../moodle/moodle.service');
 
 function safeParseObject(value, fallback = {}) {
   if (!value) return fallback;
@@ -30,6 +32,9 @@ const LMS_INTENTS = [
   'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_aktivitas_course',
   'cek_pengajar_course', 'cek_course_saya', 'buka_aktivitas', 'tanya_email', 'tanya_username'
 ];
+
+// [v0.9.23] Base URL Moodle (untuk membangun link bukti aktivitas pada jawaban komplain).
+const MOODLE_BASE_URL = 'https://lms.smpn167jakarta.sch.id';
 
 const QUICK_VISUAL_GUIDE_INTENTS = [
   'bantuan_login', 'bantuan_dashboard', 'navigasi_kursus',
@@ -256,7 +261,343 @@ function buildAcronymLearningResponse({ message = '', retrievalResults = [] } = 
   ].join('\n');
 }
 
-function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
+// [v0.9.9] Ambil kutipan **tebal** pertama dari jawaban AI (untuk disorot saat buka materi).
+function extractBoldQuote(text = '') {
+  const s = String(text || '');
+  // [v0.9.11] Jawaban "tidak ada di materi" mem-bold nama materi, bukan kutipan asli → skip.
+  if (/belum dibahas di materi|maaf, ini sepertinya/i.test(s)) return '';
+  const m = s.match(/\*\*(.+?)\*\*/s);
+  const q = m ? String(m[1]).replace(/\s+/g, ' ').trim() : '';
+  // Abaikan kutipan terlalu pendek (mis. sapaan nama) atau terlalu panjang.
+  return q && q.length >= 8 && q.length <= 300 ? q : '';
+}
+
+// [v0.9.14] Alur penuh sengketa jawaban kuis (Langkah 1-5).
+// Mengembalikan { message } bila berhasil cek, { notAttempted } / { unavailable } untuk
+// kondisi lain, atau null kalau data kurang → caller pakai fallback "lapor guru".
+async function analyzeQuizDispute({ projectId, courseId, userId, quizNum, qNum, studentName }) {
+  if (!courseId || !userId || !quizNum || !qNum) return null;
+
+  const stripHtml = (s) => String(s || '')
+    .replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+
+  // [1] Cari QUIZ_ID dari "Kuis N" (cocokkan nama mengandung angka, fallback urutan).
+  let quizzes = [];
+  try {
+    const r = await moodleService.getQuizzes(projectId, [courseId]);
+    quizzes = Array.isArray(r?.quizzes) ? r.quizzes : (Array.isArray(r) ? r : []);
+  } catch (e) { console.warn('[Sengketa] getQuizzes:', e.message); return null; }
+  if (!quizzes.length) return null;
+  const quiz = quizzes.find((q) => new RegExp(`\\b${quizNum}\\b`).test(String(q.name || ''))) || quizzes[Number(quizNum) - 1];
+  if (!quiz?.id) return null;
+  const quizName = quiz.name || `Kuis ${quizNum}`;
+
+  // [2] Attempt 'finished'.
+  let attempts = [];
+  try {
+    const r = await moodleService.getUserQuizAttempts(projectId, quiz.id, userId);
+    attempts = Array.isArray(r?.attempts) ? r.attempts : (Array.isArray(r) ? r : []);
+  } catch (e) { console.warn('[Sengketa] getUserQuizAttempts:', e.message); return { quizName, unavailable: true }; }
+  const finished = attempts.filter((a) => String(a.state) === 'finished');
+  if (!finished.length) return { quizName, notAttempted: true };
+  const attemptId = finished[finished.length - 1].id;
+
+  // [3] Review lembar jawaban → soal slot = qNum. (butuh mod_quiz_get_attempt_review)
+  let review = null;
+  try {
+    review = await moodleService.getQuizAttemptReview(projectId, attemptId);
+  } catch (e) { console.warn('[Sengketa] getQuizAttemptReview (mungkin belum diizinkan admin):', e.message); return { quizName, unavailable: true }; }
+  const questions = Array.isArray(review?.questions) ? review.questions : [];
+  const q = questions.find((x) => Number(x.slot) === Number(qNum) || Number(x.number) === Number(qNum));
+  if (!q) return { quizName, unavailable: true };
+
+  const reviewText = stripHtml(q.html).slice(0, 1600);
+  const status = String(q.status || q.statusdetails || '').toLowerCase();
+  // Bukti visual: HTML review asli dari Moodle (script dibuang; dirender di iframe sandbox).
+  const reviewHtml = String(q.html || '').replace(/<script[\s\S]*?<\/script>/gi, '').slice(0, 30000);
+
+  // [4] RAG materi relevan (pakai teks soal sebagai query).
+  let materiText = '';
+  try {
+    const hits = await retrievalService.retrieve(projectId, reviewText.slice(0, 200), {}, 3, { sourceType: 'document_chunk' });
+    materiText = (hits || []).map((h) => h.content || h.chunk_text).filter(Boolean).join('\n\n').slice(0, 3000);
+  } catch (_) { /* abaikan */ }
+
+  // [5] AI menyimpulkan berdasarkan materi (bukan menebak).
+  const prompt = `Kamu AI Learning Buddy untuk siswa SMP. Bahasa Indonesia ramah & sederhana.
+Siswa bernama ${studentName} merasa penilaian kuis ini keliru. CEK berdasarkan MATERI, jangan menebak.
+
+SOAL & HASIL PENGERJAAN SISWA (dari Moodle; status penilaian sistem: ${status || 'tidak diketahui'}):
+${reviewText}
+
+MATERI TERKAIT (dari basis pengetahuan):
+${materiText || '(materi terkait tidak ditemukan)'}
+
+Buat balasan singkat & ramah:
+- Sebutkan kamu sudah mengecek "${quizName}" nomor ${qNum} miliknya.
+- Bandingkan jawaban siswa dengan materi. Jika jawaban siswa TIDAK sesuai materi → jelaskan jawaban yang benar, KUTIP bagian materi (bungkus **tebal**), simpulkan penilaian sistem sudah tepat, ajak baca ulang materi.
+- Jika materi justru MENDUKUNG jawaban siswa (kemungkinan kunci guru keliru) → katakan dugaan siswa mungkin benar, sarankan lapor guru dengan sopan.
+- Jika materi tidak cukup → katakan terus terang & sarankan tanya guru. Jangan mengarang.`;
+
+  let aiText = '';
+  try {
+    const g = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { intent: 'sengketa_jawaban', responseMode: 'detail' });
+    if (g.ok) aiText = g.text;
+  } catch (e) { console.warn('[Sengketa] AI compare gagal:', e.message); }
+  if (!aiText) return { quizName, unavailable: true, reviewHtml };
+
+  return { quizName, qNum, message: aiText, status, reviewHtml };
+}
+
+// [v0.9.19] Helper bersama: resolve kuis (by id/nama) + attempt 'finished' siswa.
+function _stripHtmlQuiz(s) {
+  return String(s || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+}
+
+// [v0.9.20] Parse HTML review soal Moodle → struktur bersih (teks soal, opsi, jawaban
+// siswa, jawaban benar). Lebih ringan & akurat daripada melempar HTML mentah (yang
+// berisi script requirejs + 14KB/soal). Cocok dgn format mod_quiz_get_attempt_review.
+function parseQuizQuestionHtml(html = '') {
+  const s = String(html || '');
+  const clean = (t) => _stripHtmlQuiz(t);
+
+  // Teks soal: di dalam <div class="qtext">…</div>
+  const qtextM = s.match(/<div class="qtext">([\s\S]*?)<\/div>\s*<\/div>/);
+  const questionText = clean(qtextM ? qtextM[1] : '');
+
+  // Jawaban benar (Moodle sudah memberi tahu): "Jawaban yang benar adalah: X"
+  const rightM = s.match(/<div class="rightanswer">([\s\S]*?)<\/div>/);
+  const correctAnswer = clean(rightM ? rightM[1] : '').replace(/^Jawaban yang benar adalah:\s*/i, '').trim();
+
+  // Opsi: tiap <input type=radio …[checked]> diikuti label (answernumber + <p>teks</p>).
+  const options = [];
+  let studentAnswer = '';
+  const optRe = /(<input[^>]*type="radio"[^>]*>)\s*<div[^>]*data-region="answer-label"[^>]*>\s*<span class="answernumber">([^<]*)<\/span>\s*<div[^>]*>\s*<p>([\s\S]*?)<\/p>/g;
+  let m;
+  while ((m = optRe.exec(s)) !== null) {
+    const inputTag = m[1];
+    const label = clean(m[2]).replace(/\.$/, '');
+    const text = clean(m[3]);
+    const selected = /\bchecked\b/.test(inputTag);
+    const isCorrect = Boolean(correctAnswer) && text.toLowerCase() === correctAnswer.toLowerCase();
+    options.push({ label, text, selected, isCorrect });
+    if (selected) studentAnswer = text;
+  }
+
+  return { questionText, studentAnswer, correctAnswer, options };
+}
+async function resolveQuizAndAttempt({ projectId, courseId, userId, quizName, quizId }) {
+  const dbg = { courseId, userId, quizName, quizId, quizzesCount: 0, matchedQuizId: null, matchedQuizName: null, attemptsCount: 0, finishedCount: 0 };
+  let quizzes = [];
+  try {
+    const r = await moodleService.getQuizzes(projectId, [courseId]);
+    quizzes = Array.isArray(r?.quizzes) ? r.quizzes : (Array.isArray(r) ? r : []);
+  } catch (e) { console.warn('[QuizDispute] getQuizzes:', e.message); return { ok: false, reason: 'quiz_unavailable', debug: dbg }; }
+  dbg.quizzesCount = quizzes.length;
+  dbg.quizNames = quizzes.map((q) => q.name);
+  if (!quizzes.length) return { ok: false, reason: 'quiz_not_found', debug: dbg };
+
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  let quiz = quizId ? quizzes.find((q) => String(q.id) === String(quizId)) : null;
+  if (!quiz && quizName) {
+    quiz = quizzes.find((q) => norm(q.name) === norm(quizName))
+      || quizzes.find((q) => norm(q.name).includes(norm(quizName)) || norm(quizName).includes(norm(q.name)));
+  }
+  if (!quiz?.id) return { ok: false, reason: 'quiz_not_found', debug: dbg };
+  const resolvedName = quiz.name || quizName || 'Kuis';
+  dbg.matchedQuizId = quiz.id; dbg.matchedQuizName = resolvedName;
+
+  let attempts = [];
+  try {
+    const r = await moodleService.getUserQuizAttempts(projectId, quiz.id, userId);
+    attempts = Array.isArray(r?.attempts) ? r.attempts : (Array.isArray(r) ? r : []);
+  } catch (e) { console.warn('[QuizDispute] getUserQuizAttempts:', e.message); return { ok: false, reason: 'attempts_unavailable', quizName: resolvedName, debug: dbg }; }
+  dbg.attemptsCount = attempts.length;
+  dbg.attemptStates = attempts.map((a) => a.state);
+  const finished = attempts.filter((a) => String(a.state) === 'finished');
+  dbg.finishedCount = finished.length;
+  console.log('[QuizDispute] resolve:', JSON.stringify(dbg));
+  if (!finished.length) return { ok: false, reason: 'not_attempted', quizName: resolvedName, quizId: quiz.id, debug: dbg };
+  return { ok: true, quizId: quiz.id, quizName: resolvedName, attemptId: finished[finished.length - 1].id, debug: dbg };
+}
+
+// [v0.9.19] Daftar soal + jawaban siswa untuk satu kuis (preview di form Komplain Kuis).
+async function listStudentQuizQuestions({ projectId, courseId, userId, quizName, quizId }) {
+  if (!projectId || !courseId || !userId) return { ok: false, reason: 'missing_context' };
+  const r = await resolveQuizAndAttempt({ projectId, courseId, userId, quizName, quizId });
+  if (!r.ok) return r;
+
+  let review = null;
+  try { review = await moodleService.getQuizAttemptReview(projectId, r.attemptId); }
+  catch (e) { console.warn('[QuizDispute] getQuizAttemptReview:', e.message); return { ok: false, reason: 'review_unavailable', quizName: r.quizName }; }
+
+  const questions = (Array.isArray(review?.questions) ? review.questions : []).map((q) => {
+    const slot = Number(q.slot) || Number(q.number) || null;
+    const parsed = parseQuizQuestionHtml(q.html);
+    const status = String(q.status || '').toLowerCase();
+    return {
+      slot,
+      number: Number(q.number) || slot,
+      status,                                  // mis. "benar" / "salah"
+      state: String(q.state || '').toLowerCase(), // gradedright / gradedwrong
+      isWrong: String(q.state || '').toLowerCase().includes('wrong'),
+      questionText: parsed.questionText,
+      studentAnswer: parsed.studentAnswer,
+      correctAnswer: parsed.correctAnswer,
+      options: parsed.options,
+      text: (parsed.questionText || _stripHtmlQuiz(q.html)).slice(0, 320)
+    };
+  }).filter((q) => q.slot);
+
+  return { ok: true, quizId: r.quizId, quizName: r.quizName, questions, debug: r.debug };
+}
+
+// [v0.9.19] Analisis sengketa LANGSUNG via quizId/nama + slot (dari form Komplain Kuis).
+// Sama dengan analyzeQuizDispute tapi tanpa tebak nomor dari teks → akurat.
+async function analyzeQuizDisputeDirect({ projectId, courseId, userId, quizName, quizId, slot, studentName }) {
+  if (!slot) return { ok: false, reason: 'missing_slot' };
+  const r = await resolveQuizAndAttempt({ projectId, courseId, userId, quizName, quizId });
+  if (!r.ok) return r;
+
+  let review = null;
+  try { review = await moodleService.getQuizAttemptReview(projectId, r.attemptId); }
+  catch (e) { console.warn('[QuizDispute] getQuizAttemptReview:', e.message); return { ok: false, reason: 'review_unavailable', quizName: r.quizName, debug: r.debug }; }
+  const questions = Array.isArray(review?.questions) ? review.questions : [];
+  const q = questions.find((x) => Number(x.slot) === Number(slot) || Number(x.number) === Number(slot));
+  if (!q) return { ok: false, reason: 'question_not_found', quizName: r.quizName, debug: r.debug };
+
+  const parsed = parseQuizQuestionHtml(q.html);
+  const status = String(q.status || '').toLowerCase();
+  const state = String(q.state || '').toLowerCase(); // gradedright / gradedwrong
+  const reviewHtml = String(q.html || '').replace(/<script[\s\S]*?<\/script>/gi, '').slice(0, 30000);
+
+  // Cari materi relevan pakai teks soal (di-scope ke course siswa).
+  let materiText = '';
+  try {
+    const hits = await retrievalService.retrieve(projectId, parsed.questionText.slice(0, 200), {}, 3, { sourceType: 'document_chunk', courseId });
+    materiText = (hits || []).map((h) => h.content || h.chunk_text).filter(Boolean).join('\n\n').slice(0, 3000);
+  } catch (_) { /* abaikan */ }
+
+  const sistemNilai = state.includes('wrong') ? 'SALAH' : state.includes('right') ? 'BENAR' : (status || 'tidak diketahui');
+  const prompt = `Kamu AI Learning Buddy untuk siswa SMP. Bahasa Indonesia ramah & sederhana.
+Siswa bernama ${studentName} komplain penilaian kuis "${r.quizName}" nomor ${slot}. Tugasmu: VERIFIKASI berdasarkan MATERI, bukan menebak.
+
+DATA SOAL (dari Moodle):
+- Pertanyaan: ${parsed.questionText || '(tidak terbaca)'}
+- Jawaban yang DIPILIH siswa: ${parsed.studentAnswer || '(tidak terbaca)'}
+- Kunci jawaban menurut Moodle: ${parsed.correctAnswer || '(tidak terbaca)'}
+- Penilaian sistem untuk jawaban siswa: ${sistemNilai}
+
+MATERI TERKAIT (dari basis pengetahuan kelas):
+${materiText || '(materi terkait tidak ditemukan)'}
+
+Buat balasan singkat, ramah, dan jujur:
+- Awali dengan menyebut sudah mengecek "${r.quizName}" nomor ${slot}.
+- Jika jawaban siswa BERBEDA dari kunci & materi MENDUKUNG kunci → jelaskan kenapa kunci benar, KUTIP bagian materi (bungkus **tebal**), simpulkan penilaian sistem sudah tepat, ajak baca ulang materi dengan menyemangati.
+- Jika materi justru MENDUKUNG jawaban siswa (mungkin kunci/guru keliru) → katakan dugaan siswa mungkin benar, sarankan melapor ke guru dengan sopan.
+- Jika materi tidak cukup untuk memastikan → katakan terus terang & sarankan tanya guru. Jangan mengarang.`;
+
+  let aiText = '';
+  try {
+    const g = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { intent: 'sengketa_jawaban', responseMode: 'detail' });
+    if (g.ok) aiText = g.text;
+  } catch (e) { console.warn('[QuizDispute] AI compare gagal:', e.message); }
+  if (!aiText) return { ok: false, reason: 'ai_failed', quizName: r.quizName, reviewHtml, debug: r.debug };
+
+  return { ok: true, quizName: r.quizName, slot, message: aiText, status, state, reviewHtml, parsed, debug: r.debug };
+}
+
+// [v0.9.15] Helper umum untuk Kasus 1-3 (status tugas / completion / evaluasi jawaban).
+function stripHtmlPlain(s) {
+  return String(s || '')
+    .replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+}
+
+function matchByNameInMessage(list = [], message = '', key = 'name') {
+  const text = normalizeText(message);
+  if (!Array.isArray(list) || !text) return null;
+  let best = null;
+  let bestScore = 0;
+  list.forEach((item) => {
+    const name = normalizeText(item[key] || '');
+    if (!name || name.length < 4) return;
+    let score = 0;
+    if (text.includes(name)) score = 100;
+    else {
+      const w = name.split(/\s+/).filter((x) => x.length >= 4);
+      if (w.length) score = (w.filter((x) => text.includes(x)).length / w.length) * 100;
+    }
+    if (score > bestScore) { bestScore = score; best = item; }
+  });
+  return bestScore >= 50 ? best : null;
+}
+
+async function getCourseAssignments(projectId, courseId) {
+  const r = await moodleService.getAssignments(projectId, [courseId]);
+  const out = [];
+  (Array.isArray(r?.courses) ? r.courses : []).forEach((c) => (c.assignments || []).forEach((a) => out.push(a)));
+  return out;
+}
+
+// KASUS 1 & 3: ambil status + teks jawaban tugas yang disebut siswa.
+async function getAssignmentSubmissionForMessage({ projectId, courseId, userId, message }) {
+  if (!courseId || !userId) return null;
+  let assigns = [];
+  try { assigns = await getCourseAssignments(projectId, courseId); } catch (e) { console.warn('[Assign] getAssignments:', e.message); return null; }
+  const assign = matchByNameInMessage(assigns, message, 'name');
+  if (!assign?.id) return null;
+  let sub = null;
+  try { sub = await moodleService.getAssignmentSubmissionStatus(projectId, assign.id, userId); }
+  catch (e) { console.warn('[Assign] submission status:', e.message); return { name: assign.name, unavailable: true }; }
+  const submission = sub?.lastattempt?.submission || sub?.lastattempt?.teamsubmission || null;
+  const status = submission?.status || 'new';
+  let onlineText = '';
+  (submission?.plugins || []).forEach((p) => {
+    if (p.type === 'onlinetext') (p.editorfields || []).forEach((f) => { if (f.text) onlineText += stripHtmlPlain(f.text) + ' '; });
+  });
+  // [v0.9.23] URL bukti (halaman tugas di VClass) untuk tombol "Buka di VClass".
+  const url = assign.cmid ? `${MOODLE_BASE_URL}/mod/assign/view.php?id=${assign.cmid}` : null;
+  return { name: assign.name, status, onlineText: onlineText.trim(), url };
+}
+
+// KASUS 2: status completion satu aktivitas yang disebut siswa (+ alasan belum centang).
+async function getActivityCompletionForMessage({ projectId, courseId, userId, message }) {
+  if (!courseId || !userId) return null;
+  let statuses = [];
+  try {
+    const r = await moodleService.getActivitiesCompletionStatus(projectId, courseId, userId);
+    statuses = Array.isArray(r?.statuses) ? r.statuses : [];
+  } catch (e) { console.warn('[Completion] status:', e.message); return null; }
+  if (!statuses.length) return null;
+
+  const nameByCmid = {};
+  const urlByCmid = {};
+  try {
+    const sections = await moodleService.getCourseContents(projectId, courseId);
+    (sections || []).forEach((s) => (s.modules || []).forEach((m) => { nameByCmid[m.id] = m.name; urlByCmid[m.id] = m.url || null; }));
+  } catch (_) { /* abaikan: nama fallback ke cmid */ }
+
+  const withName = statuses.map((st) => ({ ...st, name: nameByCmid[st.cmid] || ('Aktivitas ' + st.cmid) }));
+  const target = matchByNameInMessage(withName, message, 'name');
+  if (!target) return null;
+
+  // Kumpulkan deskripsi aturan yang BELUM terpenuhi.
+  const unmet = [];
+  (Array.isArray(target.details) ? target.details : []).forEach((d) => {
+    const desc = (d.rulevalue && d.rulevalue.description) || d.description || d.rulename || '';
+    const ruleStatus = (d.rulevalue && typeof d.rulevalue.status !== 'undefined') ? d.rulevalue.status : null;
+    if (desc && (ruleStatus === 0 || ruleStatus === false)) unmet.push(stripHtmlPlain(desc));
+    else if (desc && ruleStatus === null) unmet.push(stripHtmlPlain(desc)); // tak tahu status → tampilkan saja
+  });
+  return { name: target.name, state: Number(target.state || 0), unmet, url: urlByCmid[target.cmid] || null };
+}
+
+function buildSourceActionsFromRetrieval(retrievalResults = [], query = '', highlightQuote = '') {
   const actions = [];
   const pdfActions = [];
   const moodleMaterials = [];
@@ -279,7 +620,7 @@ function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
 
     if (isPdf && !seenPdf.has(fileUrl)) {
       seenPdf.add(fileUrl);
-      pdfActions.push({ type: 'open_pdf_viewer', label: `Buka sumber materi: ${title}`.slice(0, 80), url: fileUrl, page_number: pageNumber, query, highlight_text: highlightText, content: item.content || item.chunk_text || '' });
+      pdfActions.push({ type: 'open_pdf_viewer', label: `Buka sumber materi: ${title}`.slice(0, 80), url: fileUrl, page_number: pageNumber, query: highlightQuote || query, highlight_text: highlightQuote || highlightText, content: item.content || item.chunk_text || '' });
       return;
     }
 
@@ -289,7 +630,8 @@ function buildSourceActionsFromRetrieval(retrievalResults = [], query = '') {
         title, topic: metadata.section_name || item.topic || '', url: fileUrl, source_url: fileUrl,
         file_type: fileType || 'html', modname: metadata.modname || 'page', class_code: metadata.class_code || '',
         course_id: metadata.moodle_course_id || null, module_id: metadata.module_id || null,
-        preview: contentSnippet.slice(0, 260), content: contentSnippet, snippets: contentSnippet ? [contentSnippet] : [], score: item.score || 0
+        preview: contentSnippet.slice(0, 260), content: contentSnippet, snippets: contentSnippet ? [contentSnippet] : [],
+        highlight: highlightQuote || '', score: item.score || 0
       });
     }
   });
@@ -318,11 +660,15 @@ function detailImage(...segments) {
 
 const ENTRY_POINT_IMAGE = detailImage('ENTRY POINT.png');
 
+// [v0.9.13] Tambahkan field `video: 'https://...'` pada entri mana pun untuk
+// memunculkan tombol "Tonton Video" (YouTube watch/youtu.be/embed atau file .mp4).
+// Tanpa `video`, tombol video tidak muncul (hanya carousel gambar statis).
 const STATIC_TUTORIALS = {
   login: {
     key: 'login',
     title: 'Cara Login ke VClass',
     shortTitle: 'Login VClass',
+    video: '', // ← isi URL video tutorial login bila ada
     intent: 'bantuan_login',
     intro: 'Tutorial ini menjelaskan langkah dasar untuk masuk ke akun VClass.',
     note: 'Catatan: gambar bisa kamu ganti/update manual sesuai screenshot VClass terbaru.',
@@ -344,7 +690,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Buka forum dari course',
         text: 'Klik salah satu forum pada course kamu. Contoh pada gambar adalah forum “Diskusi: Keuntungan CMS”.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL BUAT FORUM', '0.png')
       },
       {
         title: 'Klik Tambahkan topik diskusi',
@@ -418,32 +764,32 @@ const STATIC_TUTORIALS = {
       {
         title: 'Buka tugas dari course',
         text: 'Pilih aktivitas tugas dari course kamu. Baca judul tugas dan pastikan kamu membuka tugas yang benar.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '0.png')
       },
       {
         title: 'Baca instruksi tugas',
         text: 'Baca instruksi tugas, format file yang diminta, batas waktu, dan ketentuan pengumpulan. Setelah siap, klik tombol untuk mengirimkan tugas.',
-        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'TUGAS INSTRUKSI.png')
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '1.png')
       },
       {
         title: 'Cek status pengajuan',
         text: 'Perhatikan status tugas. Dari sini kamu bisa tahu apakah tugas belum dikumpulkan, sudah terkirim, atau masih bisa diedit.',
-        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'TUGAS STATUS.png')
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '2.png')
       },
       {
         title: 'Isi catatan jika perlu',
         text: 'Jika guru meminta catatan atau deskripsi tambahan, tuliskan pada kolom pesan/teks yang tersedia.',
-        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'INPUT TEKS TUGAS.png')
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '3.png')
       },
       {
         title: 'Upload file tugas',
         text: 'Unggah file tugas sesuai format yang diminta, misalnya PDF, PNG, JPG, DOCX, atau format lain sesuai instruksi guru. Setelah itu simpan/kirim.',
-        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'INPUT FILE TUGAS.png')
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '4.png')
       },
       {
         title: 'Pastikan status selesai',
         text: 'Setelah mengirim, pastikan status tugas menunjukkan bahwa tugas sudah berhasil dikumpulkan.',
-        image: detailImage('TUTORIAL KUMPULIN TUGAS', 'STATUS SELESAI.png')
+        image: detailImage('TUTORIAL KUMPULIN TUGAS', '5.png')
       }
     ]
   },
@@ -459,7 +805,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Perhatikan halaman course',
         text: 'Tetap di halaman course. Dari sini kamu bisa melihat menu yang tersedia untuk course tersebut.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL LIHAT AKTIVITAS', '0.png')
       },
       {
         title: 'Klik menu Aktivitas',
@@ -480,7 +826,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Perhatikan halaman course',
         text: 'Tetap di halaman course. Dari sini kamu bisa membuka menu nilai pada course tersebut.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL LIHAT NILAI', '0.png')
       },
       {
         title: 'Klik menu Nilai',
@@ -537,7 +883,7 @@ const STATIC_TUTORIALS = {
       {
         title: 'Pilih link kuis dari course',
         text: 'Klik link kuis yang ingin kamu kerjakan dari halaman course.',
-        image: ENTRY_POINT_IMAGE
+        image: detailImage('TUTORIAL QUIS', '0.png')
       },
       {
         title: 'Baca instruksi kuis',
@@ -754,7 +1100,40 @@ function cloneStaticTutorial(tutorial = {}) {
   return JSON.parse(JSON.stringify(tutorial || {}));
 }
 
-function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', effectiveMessage = '' }) {
+// [v0.9.9] Cari instruksi aktivitas (KB) yang namanya disebut user di pesannya.
+// Dipakai agar pertanyaan "cara kumpul tugas <NAMA>" menjawab info tugas spesifik dulu.
+function findMatchingActivity(activities = [], message = '') {
+  const text = normalizeText(message);
+  if (!Array.isArray(activities) || !text) return null;
+  let best = null;
+  let bestScore = 0;
+  activities.forEach((a) => {
+    const title = normalizeText(a.title || '');
+    if (!title || title.length < 4) return;
+    let score = 0;
+    if (text.includes(title)) {
+      score = 100;
+    } else {
+      const titleWords = title.split(/\s+/).filter((w) => w.length >= 4);
+      if (titleWords.length) {
+        const hit = titleWords.filter((w) => text.includes(w)).length;
+        score = (hit / titleWords.length) * 100;
+      }
+    }
+    if (score > bestScore) { bestScore = score; best = a; }
+  });
+  return bestScore >= 60 ? best : null;
+}
+
+function buildActivityInfoText(activity = {}) {
+  const parts = [`📌 **${String(activity.title || 'Tugas ini').trim()}**`];
+  if (activity.instruction) parts.push(String(activity.instruction).trim());
+  if (activity.deadline) parts.push(`⏰ **Tenggat:** ${String(activity.deadline).trim()}`);
+  if (activity.completion_criteria) parts.push(`✅ **Syarat selesai:** ${String(activity.completion_criteria).trim()}`);
+  return parts.join('\n\n');
+}
+
+function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', effectiveMessage = '', activityInfo = '' }) {
   const tutorial = STATIC_TUTORIALS[tutorialKey];
   if (!tutorial) return null;
 
@@ -762,18 +1141,31 @@ function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', e
   const payload = cloneStaticTutorial(tutorial);
   payload.original_message = effectiveMessage;
 
-  return {
-    message:
-      `Hai **${safeName}**,\n\n` +
+  // [v0.9.9] Kalau user menyebut tugas spesifik & ada instruksinya → info tugas DULU,
+  // baru tutorial visual sebagai pelengkap.
+  const message = activityInfo
+    ? `Hai **${safeName}**,\n\n${activityInfo}\n\n———\n\n` +
+      `Supaya makin jelas, aku siapkan juga panduan visual **${tutorial.title}**. ` +
+      `Klik tombol di bawah untuk membuka langkah-langkahnya.`
+    : `Hai **${safeName}**,\n\n` +
       `Aku sudah siapkan panduan visual **${tutorial.title}**.\n\n` +
       `Silakan klik tombol di bawah ini untuk membuka langkah-langkahnya dalam bentuk carousel. ` +
-      `Gambarnya bisa diklik supaya tampil lebih besar.`,
+      `Gambarnya bisa diklik supaya tampil lebih besar.`;
+
+  // [v0.9.13] Opsi video tutorial — hanya muncul jika tutorial punya `video` (URL).
+  const videoAction = tutorial.video
+    ? [{ type: 'video_tutorial', label: `Tonton Video: ${tutorial.shortTitle || tutorial.title}`, url: tutorial.video, title: tutorial.title }]
+    : [];
+
+  return {
+    message,
     actions: [
       {
         type: 'static_tutorial_carousel',
         label: `Lihat Tutorial ${tutorial.shortTitle || tutorial.title}`,
         payload
       },
+      ...videoAction,
       {
         type: 'ask_ai',
         label: 'Belum jelas, jelaskan dengan AI',
@@ -849,7 +1241,27 @@ function buildMentionTaskPrompt(task, label, materiContent, cleanQ) {
     return `${head}\nBuat 3 SOAL LATIHAN dari materi ini (boleh pilihan ganda/isian). Untuk tiap soal beri petunjuk cara menjawab. Taruh kunci jawaban singkat di bagian paling bawah dengan judul "Kunci".${body}`;
   }
   // Tanya-jawab bebas (mode AI) atas materi.
-  return `${head}\nJawab pertanyaan siswa berdasarkan materi ini. Jika tidak ada di materi, katakan terus terang & sarankan tanya guru.\nPertanyaan: ${cleanQ}${body}`;
+  // [v0.9.11] Dua cabang TEGAS: ada di materi → jawab + kutipan **tebal**.
+  // TIDAK ada → JUJUR bilang belum ada di materi + beri kata kunci bantuan, JANGAN
+  // dipaksakan seolah dari materi ("Berdasarkan materi..." padahal tidak ada).
+  const qaHead = `Kamu AI Learning Buddy untuk siswa SMP. Jawab dengan bahasa Indonesia yang sederhana dan ramah.`;
+  return `${qaHead}
+Tugasmu menjawab pertanyaan siswa tentang materi "${label}". Ikuti aturan ini dengan TEGAS:
+
+1) Jika jawaban BENAR-BENAR ADA di dalam isi materi di bawah:
+   - JANGAN menyalin kalimat materi mentah-mentah/persis. OLAH ULANG dengan bahasamu sendiri yang lebih sederhana & enak dibaca siswa SMP (boleh pakai analogi singkat).
+   - Jika pertanyaannya soal CARA/LANGKAH (mis. "cara", "gimana", "bagaimana", "langkah", "menginstall", "membuat"), susun jawabannya sebagai **LANGKAH BERURUTAN bernomor** (Langkah 1, Langkah 2, …), tiap langkah singkat & jelas.
+   - Jika di materi ada TAUTAN/LINK (mis. link download/unduh), SERTAKAN link itu apa adanya supaya bisa diklik siswa.
+   - Tetap SETIA pada isi materi — jangan menambah fakta/angka yang tidak ada di materi.
+
+2) Jika jawaban TIDAK ADA / tidak dibahas di materi:
+   - JANGAN mengarang dan JANGAN menulis "Berdasarkan materi ...".
+   - JANGAN menyuruh siswa "cari sendiri di internet / Google".
+   - Awali dengan kalimat jujur & sopan yang mengakui keterbatasan, contoh gaya: "Maaf, untuk **<inti yang ditanya, mis. cara install XAMPP>** sepertinya belum tersedia/dibahas di materi **${label}** ini."
+   - Lalu jelaskan SINGKAT (1 kalimat, berdasarkan isi materi di bawah) materi ini sebenarnya membahas tentang apa, supaya siswa paham cakupannya.
+   - Tutup dengan sopan: sarankan menanyakan langsung ke gurunya kalau memang membutuhkan hal itu. Nada membantu, bukan menyuruh siswa repot sendiri.
+
+Pertanyaan siswa: ${cleanQ}${body}`;
 }
 
 function isCacheableAIRequest({ detectedIntent, forceAI, forceFAQ, forceSystem }) {
@@ -1694,6 +2106,10 @@ function isAiFollowupPrompt(message = '', forceAI = false) {
 // FUNGSI UTAMA
 
 const chatService = {
+  // [v0.9.19] Dipakai endpoint Komplain Kuis (preview soal + analisis sengketa langsung).
+  listStudentQuizQuestions,
+  analyzeQuizDisputeDirect,
+
   async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null, mention = null, freshMention = false }) {
     const session = await chatModel.getSessionById(sessionId);
     let pageContextState = safeParseObject(session.page_context, {});
@@ -1723,15 +2139,29 @@ const chatService = {
       getCourseIdFromUrl(pageContext?.sourceUrl) ||
       null;
 
-    const moodleUserId =
-      sessionMeta.moodle_user_id ||
-      pageContext?.session_meta?.moodle_user_id ||
-      null;
-
     const studentEmail =
       sessionMeta.email ||
       pageContext?.session_meta?.email ||
       null;
+
+    const moodleUserIdDom =
+      sessionMeta.moodle_user_id ||
+      pageContext?.session_meta?.moodle_user_id ||
+      null;
+
+    // [v0.9.22] userId Moodle OTORITATIF. id hasil scraping DOM widget bisa KELIRU
+    // (mis. 773 padahal 772) → cek status tugas/forum/kuis ikut salah. Kalau ada email,
+    // resolve userId dari enrolled users Moodle (cached). Fallback ke id DOM.
+    let moodleUserId = moodleUserIdDom;
+    if (studentEmail) {
+      try {
+        const rs = await moodleService.resolveStudentByEmail(projectId, studentEmail, fallbackCourseId ? { courseId: fallbackCourseId } : {});
+        if (rs?.found && rs.moodle_user_id) moodleUserId = rs.moodle_user_id;
+      } catch (e) { console.warn('[Chat] resolveStudentByEmail gagal:', e.message); }
+    }
+    if (String(moodleUserId) !== String(moodleUserIdDom)) {
+      console.log('[Chat] userId override via email:', JSON.stringify({ dom: moodleUserIdDom, resolved: moodleUserId, email: studentEmail }));
+    }
 
     const enrolledCourses =
       sessionMeta.enrolled_courses ||
@@ -1763,6 +2193,33 @@ const chatService = {
     }
 
     const effectiveMessage = forceAI ? cleanFeedbackPrompt(message) : message;
+
+    // [v0.9.24] DISAMBIGUASI: kalau pertanyaan AMBIGU (mis. "hari senin ngerjain apa aja"),
+    // jangan paksa tebak intent — tawarkan maks 4 pilihan dulu. Saat siswa klik salah satu,
+    // FE kirim ulang dengan INTENT EKSPLISIT → langsung ke handler yang benar.
+    // Tidak dijalankan saat: user memaksa AI, intent sudah eksplisit (mis. dari tombol pilihan),
+    // ada mention @, atau sedang memilih elemen.
+    if (!forceAI && !intent && !mention && !elementContext) {
+      const ambig = intentService.detectAmbiguousIntent(effectiveMessage);
+      if (ambig) {
+        const actions = (ambig.candidates || []).slice(0, 4).map((c) => ({
+          type: 'pick_intent', label: c.label, intent: c.intent, prompt: c.prompt
+        }));
+        const msgText = `Hai **${studentName}**,\n\n${ambig.question}`;
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'disambiguasi' });
+        await chatModel.createMessage({
+          session_id: sessionId, role: 'assistant', message: msgText, intent: 'disambiguasi',
+          context_used: { response_source: 'system', used_model: 'disambiguasi', actions }
+        });
+        return {
+          intent: 'disambiguasi', response_source: 'system',
+          ai_usage: aiRateLimitService.getStatus(sessionId),
+          is_locked: safetyState.locked, warnings: safetyState.warnings,
+          botMessage: { message: msgText, actions }
+        };
+      }
+    }
+
     let detectedIntent = intent || await intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI });
 
     const manualMappedIntent = !intent ? inferManualSidebarIntent(effectiveMessage) : '';
@@ -1772,7 +2229,9 @@ const chatService = {
 
     // Guard tambahan: jangan biarkan pertanyaan status LMS seperti
     // "Quiz apa yang belum saya kerjakan?" salah masuk ke tutorial "Cara mengerjakan kuis".
-    const lmsStatusIntent = inferLmsStatusIntentFromMessage(effectiveMessage);
+    // [v0.9.23] HORMATI intent eksplisit (mis. dari form Komplain) — jangan ditimpa.
+    // Sebelumnya ini menimpa intent yang dikirim FE → komplain tugas malah jadi tabel kuis.
+    const lmsStatusIntent = !intent ? inferLmsStatusIntentFromMessage(effectiveMessage) : '';
     if (!forceAI && lmsStatusIntent) {
       detectedIntent = lmsStatusIntent;
     }
@@ -1805,7 +2264,10 @@ const chatService = {
 
     const manualMaterialRequest = isManualMaterialRequest(effectiveMessage) || isExplicitMaterialRequest;
 
-    if (manualMaterialRequest || shouldBypassVisualGuideForManualMaterial(effectiveMessage, detectedIntent)) {
+    // [v0.9.9] Jangan override intent daftar_materi (list materi) jadi penjelasan_materi.
+    // [v0.9.23] Juga HORMATI intent eksplisit (form Komplain kirim cek_status_tugas dll;
+    // pesannya bisa memuat kata "materi" → jangan ditarik ke penjelasan_materi).
+    if (!intent && detectedIntent !== 'daftar_materi' && (manualMaterialRequest || shouldBypassVisualGuideForManualMaterial(effectiveMessage, detectedIntent))) {
       detectedIntent = 'penjelasan_materi';
       expectedSourceType = 'document_chunk';
     }
@@ -1847,16 +2309,248 @@ const chatService = {
     // Panduan ini murni memakai screenshot di FE/public/DETAIL.
     // Kalau user klik "Belum jelas, jelaskan dengan AI", forceAI=true sehingga jalur AI tetap berjalan.
     // ==========================================
+    // [v0.9.9] "Ada materi apa aja di kursus ini?" → tampilkan DAFTAR materi yang tersedia
+    // (dari dokumen yang sudah disinkron admin), bukan jalur penjelasan konsep yang sering gagal.
+    // [v0.9.17] Komplain samar lewat chat ("aku mau komplain / ini gak adil"): JANGAN
+    // dijawab bebas (mudah salah rute), tapi arahkan ke TEMPLATE komplain terpandu.
+    // Tombol open_complaint akan membuka modal komplain di FE → submit di sana langsung
+    // memicu algoritma yang tepat (sengketa kuis / status tugas / status forum).
+    if (detectedIntent === 'komplain') {
+      const komplainMsg = `Hai **${studentName}**,\n\nKamu mau menyampaikan komplain ya? Biar lebih jelas dan langsung diproses dengan benar, yuk pakai **form komplain terpandu** — kamu tinggal pilih jenisnya (Tugas/Kuis/Materi/Forum), nama bagiannya, lalu alasannya.\n\nKlik tombol di bawah ini ya 👇`;
+      const komplainActions = [{ type: 'open_complaint', label: '📝 Buka Form Komplain' }];
+
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'komplain' });
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message: komplainMsg, intent: 'komplain',
+        context_used: { response_source: 'system', used_model: 'komplain', actions: komplainActions }
+      });
+
+      return {
+        intent: 'komplain', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: komplainMsg, actions: komplainActions }
+      };
+    }
+
+    if (detectedIntent === 'daftar_materi') {
+      let materiList = [];
+      try {
+        const docs = await documentModel.findByProjectId(projectId);
+        materiList = (docs || []).filter((d) => d && (d.title || d.topic));
+      } catch (e) { console.warn('[Chat] Gagal ambil daftar materi:', e.message); }
+
+      let daftarMsg;
+      if (!materiList.length) {
+        daftarMsg = `Hai **${studentName}**,\n\nSepertinya belum ada materi yang tersedia untuk kursus ini. Coba tanyakan ke gurumu ya. 🙏`;
+      } else {
+        const lines = materiList.slice(0, 30).map((d, i) => {
+          const title = String(d.title || d.topic || `Materi ${i + 1}`).trim();
+          const topic = (d.topic && String(d.topic).trim() && String(d.topic).trim() !== title) ? ` — _${String(d.topic).trim()}_` : '';
+          return `${i + 1}. **${title}**${topic}`;
+        }).join('\n');
+        daftarMsg = `Hai **${studentName}**,\n\nIni daftar materi yang ada di kursus ini:\n\n${lines}\n\nKamu bisa ketik **@** di kolom chat lalu pilih materinya untuk minta rangkuman, poin penting, atau soal latihan. 😊`;
+      }
+
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'daftar_materi' });
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message: daftarMsg, intent: 'daftar_materi',
+        context_used: { response_source: 'system', used_model: 'daftar_materi', actions: [] }
+      });
+
+      return {
+        intent: 'daftar_materi', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: daftarMsg, actions: [] }
+      };
+    }
+
+    // [v0.9.14] Sengketa jawaban kuis: siswa merasa kunci/jawaban kuis salah padahal
+    // menurut materi benar. Catatan: WS yang diizinkan TIDAK mengekspos kunci jawaban
+    // per-soal (perlu mod_quiz_get_attempt_review), jadi sistem TIDAK mengklaim benar/salah.
+    // Yang dilakukan: identifikasi kuis (best-effort via Moodle), arahkan cek materi,
+    // lalu siapkan pelaporan ke guru dengan template.
+    if (detectedIntent === 'sengketa_jawaban') {
+      const quizNumMatch = effectiveMessage.match(/\b(?:kuis|quis|quiz)\s*(\d{1,2})\b/i);
+      const qNumMatch = effectiveMessage.match(/\b(?:no(?:mor|mer)?|soal)\s*(\d{1,2})\b/i);
+      const quizNum = quizNumMatch ? quizNumMatch[1] : '';
+      const qNum = qNumMatch ? qNumMatch[1] : '';
+      const sm = pageContextState?.session_meta || {};
+      const courseId = fallbackCourseId || sm.course_id || session?.course_context?.course_id || null;
+      const userId = moodleUserId || sm.moodle_user_id || null;
+
+      // Coba alur PENUH: ambil soal+jawaban siswa dari Moodle → bandingkan materi → AI simpulkan.
+      let dispute = null;
+      try {
+        dispute = await analyzeQuizDispute({ projectId, courseId, userId, quizNum, qNum, studentName });
+      } catch (e) { console.warn('[Sengketa] analyze gagal:', e.message); }
+
+      let msgText;
+      let disputeActions = [];
+
+      if (dispute?.message) {
+        // Sukses cek otomatis (butuh mod_quiz_get_attempt_review aktif).
+        msgText = addStudentGreeting(dispute.message, studentName);
+        const waText = encodeURIComponent(`Halo Pak/Bu, saya ${studentName}. Saya ingin menanyakan penilaian "${dispute.quizName}" nomor ${qNum}. [tulis keberatanmu di sini]. Terima kasih.`);
+        if (dispute.reviewHtml) {
+          // [v0.9.16] Bukti visual: tombol untuk membuka review jawaban asli dari Moodle.
+          disputeActions.push({ type: 'open_html_view', label: 'Lihat Review Jawaban', html: dispute.reviewHtml, title: `Review ${dispute.quizName} nomor ${qNum}` });
+        }
+        disputeActions.push({ type: 'wa_teacher', label: 'Masih ragu? Tanya Guru', url: `https://api.whatsapp.com/send/?phone=628989807094&text=${waText}` });
+      } else if (dispute?.notAttempted) {
+        msgText = `Hai **${studentName}**,\n\nAku cek di sistem, sepertinya kamu **belum menyelesaikan ${dispute.quizName}** ini. Jadi belum ada lembar jawaban yang bisa aku periksa. Kalau sudah mengerjakan tapi ini muncul, coba refresh atau tanyakan ke gurumu ya. 🙏`;
+      } else {
+        // Fallback: tak bisa cek otomatis (data user/course kurang, WS review belum diizinkan,
+        // atau AI tak tersedia) → akui jujur + arahkan materi + lapor guru bertemplate.
+        const quizLabel = dispute?.quizName || (quizNum ? `Kuis ${quizNum}` : 'kuis tersebut');
+        const waText = encodeURIComponent(
+          `Halo Pak/Bu, saya ${studentName}. Saya merasa jawaban pada "${quizLabel}"${qNum ? ` nomor ${qNum}` : ''} kurang tepat. ` +
+          `Menurut materi yang saya pelajari, jawaban yang benar seharusnya: [tulis jawabanmu di sini]. Mohon dicek kembali ya. Terima kasih.`
+        );
+        disputeActions = [{ type: 'wa_teacher', label: 'Laporkan ke Guru (via WA)', url: `https://api.whatsapp.com/send/?phone=628989807094&text=${waText}` }];
+        msgText =
+          `Hai **${studentName}**,\n\n` +
+          `Untuk **${quizLabel}${qNum ? ` nomor ${qNum}` : ''}** ini, aku **belum bisa membuka lembar jawabanmu secara otomatis** (akses ke detail kuis belum tersedia). Jadi aku belum bisa memastikan benar/salahnya.\n\n` +
+          `Yang bisa kamu lakukan:\n` +
+          `1. **Cek ulang materinya** — ketik **@** lalu pilih materi terkait, tanyakan bagian yang kamu maksud. Aku bantu carikan kutipannya.\n` +
+          `2. Kalau kamu **tetap yakin** jawabanmu benar, **laporkan ke guru** lewat tombol di bawah (pesannya sudah aku siapkan).`;
+      }
+
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'sengketa_jawaban' });
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message: msgText, intent: 'sengketa_jawaban',
+        context_used: { response_source: dispute?.message ? 'ai' : 'system', used_model: 'sengketa_jawaban', actions: disputeActions }
+      });
+      return {
+        intent: 'sengketa_jawaban', response_source: dispute?.message ? 'ai' : 'system', ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: msgText, actions: disputeActions }
+      };
+    }
+
+    // [v0.9.15] KASUS 1: "udah upload tugas tapi masih dibilang belum ngumpul" → cek status.
+    if (detectedIntent === 'cek_status_tugas') {
+      const sm = pageContextState?.session_meta || {};
+      const courseId = fallbackCourseId || sm.course_id || session?.course_context?.course_id || null;
+      const userId = moodleUserId || sm.moodle_user_id || null;
+      let r = null;
+      try { r = await getAssignmentSubmissionForMessage({ projectId, courseId, userId, message: effectiveMessage }); } catch (e) { console.warn('[Kasus1]', e.message); }
+
+      let msgText;
+      if (r && r.status && !r.unavailable) {
+        const nm = r.name || 'tugas itu';
+        if (r.status === 'submitted') {
+          msgText = `Hai **${studentName}**,\n\nKabar baik — tugas **${nm}** kamu **sudah berhasil terkirim** (status: *Submitted*) 🎉. Tinggal tunggu dinilai gurumu ya.`;
+        } else if (r.status === 'draft') {
+          msgText = `Hai **${studentName}**,\n\nAku cek tugas **${nm}**: file kamu **sudah ter-upload**, TAPI statusnya masih **Draft**. Artinya kamu belum menekan tombol **"Kirim Pengajuan / Submit"** di halaman akhirnya.\n\n👉 Yuk buka lagi tugasnya, lalu klik **Kirim** supaya bisa dinilai gurumu.`;
+        } else {
+          msgText = `Hai **${studentName}**,\n\nAku cek tugas **${nm}**, sepertinya **belum ada file yang terunggah** (status: belum mengumpulkan). Coba upload dulu filenya lalu klik **Kirim** ya.`;
+        }
+      } else {
+        msgText = `Hai **${studentName}**,\n\nAku belum bisa membaca status tugas itu otomatis (mungkin nama tugasnya kurang cocok, atau datanya belum tersedia). Coba sebutkan **nama tugasnya lebih persis**, atau buka langsung tugas itu di VClass untuk cek statusnya ya. 🙏`;
+      }
+
+      const tugasActions = (r && r.url) ? [{ type: 'open_url', label: '🔗 Buka tugas di VClass', url: r.url, pageType: 'tugas' }] : [];
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'cek_status_tugas' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: msgText, intent: 'cek_status_tugas', context_used: { response_source: 'system', used_model: 'cek_status_tugas', actions: tugasActions } });
+      return { intent: 'cek_status_tugas', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: msgText, actions: tugasActions } };
+    }
+
+    // [v0.9.15] KASUS 2: "udah komen forum kok belum centang hijau" → cek aturan completion.
+    if (detectedIntent === 'cek_status_completion') {
+      const sm = pageContextState?.session_meta || {};
+      const courseId = fallbackCourseId || sm.course_id || session?.course_context?.course_id || null;
+      const userId = moodleUserId || sm.moodle_user_id || null;
+      let r = null;
+      try { r = await getActivityCompletionForMessage({ projectId, courseId, userId, message: effectiveMessage }); } catch (e) { console.warn('[Kasus2]', e.message); }
+
+      let msgText;
+      if (r) {
+        const nm = r.name || 'aktivitas itu';
+        if (r.state >= 1) {
+          msgText = `Hai **${studentName}**,\n\nAku cek, **${nm}** sebenarnya **sudah tercatat selesai** ✅ di sistem. Kalau centangnya belum kelihatan, coba **refresh halamannya** ya.`;
+        } else if (r.unmet && r.unmet.length) {
+          const list = r.unmet.map((u) => `• ${u}`).join('\n');
+          msgText = `Hai **${studentName}**,\n\nAku sudah cek log aktivitasmu untuk **${nm}**. Centang hijaunya belum muncul karena **syarat penyelesaian belum terpenuhi**:\n\n${list}\n\nYuk lengkapi syarat di atas dulu, nanti centangnya muncul otomatis. 💪`;
+        } else {
+          msgText = `Hai **${studentName}**,\n\nAku cek, **${nm}** **belum tercatat selesai** di sistem. Pastikan kamu sudah memenuhi semua syaratnya (mis. jumlah balasan/komentar minimal), lalu cek lagi ya.`;
+        }
+      } else {
+        msgText = `Hai **${studentName}**,\n\nAku belum bisa membaca status penyelesaian aktivitas itu otomatis. Coba sebutkan **nama aktivitas/forumnya lebih persis**, atau buka aktivitas itu di VClass untuk lihat syaratnya ya. 🙏`;
+      }
+
+      const forumActions = (r && r.url) ? [{ type: 'open_url', label: '🔗 Buka aktivitas di VClass', url: r.url, pageType: 'forum' }] : [];
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'cek_status_completion' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: msgText, intent: 'cek_status_completion', context_used: { response_source: 'system', used_model: 'cek_status_completion', actions: forumActions } });
+      return { intent: 'cek_status_completion', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: msgText, actions: forumActions } };
+    }
+
+    // [v0.9.15] KASUS 3: "jawaban tugas X dibilang OOT, salahnya di mana" → ambil teks jawaban + bandingkan materi (AI).
+    if (detectedIntent === 'evaluasi_jawaban_tugas') {
+      const sm = pageContextState?.session_meta || {};
+      const courseId = fallbackCourseId || sm.course_id || session?.course_context?.course_id || null;
+      const userId = moodleUserId || sm.moodle_user_id || null;
+      let r = null;
+      try { r = await getAssignmentSubmissionForMessage({ projectId, courseId, userId, message: effectiveMessage }); } catch (e) { console.warn('[Kasus3]', e.message); }
+
+      let msgText;
+      let evalSource = 'system';
+      const aiAvail = !(aiUsage.cooldown_active || aiUsage.limit_reached || aiUsage.canUseAI === false);
+
+      if (r && r.onlineText && aiAvail) {
+        let materiText = '';
+        try {
+          const hits = await retrievalService.retrieve(projectId, r.onlineText.slice(0, 200), {}, 3, { sourceType: 'document_chunk' });
+          materiText = (hits || []).map((h) => h.content || h.chunk_text).filter(Boolean).join('\n\n').slice(0, 3000);
+        } catch (_) {}
+        const prompt = `Kamu AI Learning Buddy untuk siswa SMP, bahasa Indonesia ramah & membangun.
+Tugas siswa "${r.name}" dinilai kurang tepat/OOT. EVALUASI berdasarkan MATERI, jangan menebak.
+
+JAWABAN SISWA:
+${r.onlineText.slice(0, 1500)}
+
+MATERI TERKAIT (basis pengetahuan):
+${materiText || '(materi terkait tidak ditemukan)'}
+
+Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melenceng dgn membandingkan jawaban siswa vs materi (KUTIP materi, bungkus **tebal**), lalu beri arahan perbaikan yang ramah. Kalau ternyata jawaban siswa sebenarnya sudah sesuai materi, katakan begitu & sarankan konfirmasi ke guru.`;
+        try {
+          const g = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { intent: 'evaluasi_jawaban_tugas', responseMode: 'detail' });
+          if (g.ok) { msgText = addStudentGreeting(g.text, studentName); evalSource = 'ai'; aiUsage = aiRateLimitService.consume(sessionId); }
+        } catch (e) { console.warn('[Kasus3] AI:', e.message); }
+      }
+
+      if (!msgText) {
+        const nm = r?.name || 'tugas itu';
+        msgText = `Hai **${studentName}**,\n\nUntuk **${nm}**, aku belum bisa membaca teks jawabanmu otomatis (atau AI sedang sibuk). Tapi kamu bisa **cek sendiri**: ketik **@** lalu pilih materi terkait, lalu bandingkan apakah konsep di jawabanmu sudah sesuai materi. Kalau masih bingung, tanyakan ke gurumu ya. 🙏`;
+      }
+
+      const evalActions = (r && r.url) ? [{ type: 'open_url', label: '🔗 Buka tugas di VClass', url: r.url, pageType: 'tugas' }] : [];
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'evaluasi_jawaban_tugas' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: msgText, intent: 'evaluasi_jawaban_tugas', context_used: { response_source: evalSource, used_model: 'evaluasi_jawaban_tugas', actions: evalActions } });
+      return { intent: 'evaluasi_jawaban_tugas', response_source: evalSource, ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: msgText, actions: evalActions } };
+    }
+
     // [v0.9.8] Jika ada mention @materi, JANGAN ambil jalur tutorial statis —
     // walau intent terdeteksi "kuis/tugas" (mis. "buat 3 soal"), permintaan @materi
     // harus diproses oleh handler mention (cache-first → AI dari isi materi).
     const hasMateriMention = mention?.type === 'materi' && (mention.documentId || mention.title || mention.sourceUrl || mention.url || mention.label);
     const staticTutorialKey = resolveStaticTutorialKey(detectedIntent, effectiveMessage);
     if (staticTutorialKey && !forceAI && !hasMateriMention) {
+      // [v0.9.9] Kalau user menyebut tugas/aktivitas spesifik & ada instruksinya di KB,
+      // sisipkan info tugas itu (instruksi+tenggat) SEBELUM tutorial visual.
+      let activityInfo = '';
+      if (['bantuan_tugas', 'bantuan_kumpul_tugas', 'bantuan_kuis', 'bantuan_quiz', 'bantuan_forum'].includes(detectedIntent)) {
+        try {
+          const acts = await activityModel.findByProjectId(projectId);
+          const matched = findMatchingActivity(acts, effectiveMessage);
+          if (matched) activityInfo = buildActivityInfoText(matched);
+        } catch (e) { console.warn('[Chat] Gagal cek instruksi aktivitas spesifik:', e.message); }
+      }
+
       const staticGuide = buildStaticTutorialChatResponse({
         studentName,
         tutorialKey: staticTutorialKey,
-        effectiveMessage
+        effectiveMessage,
+        activityInfo
       });
 
       if (staticGuide) {
@@ -1943,7 +2637,7 @@ const chatService = {
       //    Sertakan label agar dokumen target lebih mudah naik peringkat.
       let mentionResults = [];
       try {
-        mentionResults = await retrievalService.retrieve(projectId, `${label} ${cleanQ}`.trim(), pageContext, 12, { sourceType: 'document_chunk' });
+        mentionResults = await retrievalService.retrieve(projectId, `${label} ${cleanQ}`.trim(), pageContext, 12, { sourceType: 'document_chunk', courseId: fallbackCourseId });
       } catch (e) { console.error('[Mention] retrieve gagal:', e.message); }
 
       // Cocokkan dokumen target via document_id (paling akurat) ATAU source_url / judul.
@@ -1976,7 +2670,10 @@ const chatService = {
       const aiAvailable = !(aiUsage.cooldown_active || aiUsage.limit_reached || aiUsage.canUseAI === false);
       // [v0.9.3] Tiap saran lanjutan @materi punya "task" sendiri (rangkum/poin/jelaskan/soal).
       const mentionTask = detectMentionTask(effectiveMessage);
-      const wantsAiKind = Boolean(mentionTask) || forceAI;
+      // [v0.9.9] Inti @materi: kalau ada PERTANYAAN nyata (mis. "@materi-1 apa itu cms"),
+      // selalu jawab via AI dari isi materi — walau mode default. Cache-first jaga kuota.
+      const hasRealQuestion = String(cleanQ || '').replace(/\s+/g, '').length >= 4;
+      const wantsAiKind = Boolean(mentionTask) || forceAI || hasRealQuestion;
 
       // ====== JALUR AI dengan CACHE-FIRST (rangkum/poin/jelaskan/soal/tanya) ======
       // Cache dulu: kalau sudah pernah dijawab → kembalikan tanpa kuota AI (berlaku walau habis).
@@ -1993,8 +2690,8 @@ const chatService = {
           simplify: { label: 'Jelaskan dengan cara lain', prompt: 'Jelaskan lagi materi ini dengan analogi/cara yang berbeda' },
           quiz: { label: 'Buat soal lain', prompt: 'Buat 3 soal latihan baru yang berbeda dari materi ini' }
         };
-        const mentionActions = () => {
-          const base = buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ);
+        const mentionActions = (highlightQuote = '') => {
+          const base = buildSourceActionsFromRetrieval(targetHit ? [targetHit] : inTarget.slice(0, 1), cleanQ, highlightQuote);
           if (mentionTask && REGEN[mentionTask] && mention.token) {
             base.push({ type: 'mention_regenerate', label: REGEN[mentionTask].label, token: mention.token, prompt: REGEN[mentionTask].prompt });
           }
@@ -2006,7 +2703,7 @@ const chatService = {
           const cached = freshMention ? null : await aiResponseCacheModel.findByKey(projectId, mentionCacheKey);
           if (cached?.answer) {
             aiResponseCacheModel.incrementHit(cached.id).catch(() => {});
-            const cachedActions = mentionActions();
+            const cachedActions = mentionActions(extractBoldQuote(cached.answer));
             const cachedText = addStudentGreeting(cached.answer, studentName) + '\n\n📚 Diambil dari basis pengetahuan sistem (hemat kuota AI).';
             await chatModel.createMessage({
               session_id: sessionId, role: 'assistant', message: cachedText, intent: 'penjelasan_materi',
@@ -2034,8 +2731,8 @@ const chatService = {
                 source_type: 'document_chunk', context_hash: cacheCtxHash, model: geminiResult.model, expires_at: getExpiresAt()
               }).catch((e) => console.warn('[Mention Cache] simpan gagal:', e.message));
 
-              const aiActions = mentionActions();
               const finalText = addStudentGreeting(geminiResult.text, studentName);
+              const aiActions = mentionActions(extractBoldQuote(geminiResult.text));
               await chatModel.createMessage({
                 session_id: sessionId, role: 'assistant', message: finalText, intent: 'penjelasan_materi',
                 context_used: { response_source: 'ai', actions: aiActions, used_model: geminiResult.model || 'mention_materi_ai', mention_task: mentionTask || 'qa' }
@@ -2218,7 +2915,7 @@ const chatService = {
 
     if (!shouldSkipRetrieval) {
       const retrievalSourceType = shouldForceMaterialRetrieval ? 'document_chunk' : (expectedSourceType || 'all');
-      retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 4, { sourceType: retrievalSourceType });
+      retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 4, { sourceType: retrievalSourceType, courseId: fallbackCourseId });
       contextString = contextBuilderService.build(retrievalResults);
     }
 

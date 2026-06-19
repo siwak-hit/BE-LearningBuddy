@@ -125,20 +125,49 @@ function applyFocusBoost(item, query) {
   return boost;
 }
 
+function getChunkCourseId(chunk = {}) {
+  const m = chunk.metadata || {};
+  const raw = m.moodle_course_id ?? m.course_id ?? null;
+  return raw === null || raw === undefined ? null : String(raw);
+}
+
 const retrievalService = {
   async retrieve(projectId, query, pageContext, limit = 5, options = {}) {
     const sourceType = options.sourceType || options.source_type || 'all';
+
+    // Scope materi ke course (kelas) siswa yang sedang aktif.
+    // Satu project bisa berisi banyak course Moodle (mis. kelas 8A–8H "Media Sosial"
+    // + kelas 9A "WordPress/CMS"). Tanpa filter ini, retrieval mengaduk SEMUA chunk
+    // lintas kelas → materi salah kelas ikut tertarik (mis. siswa WordPress malah
+    // dapat chunk Cyberbullying) + duplikasi 8× antar kelas jadi noise.
+    const courseId =
+      options.courseId !== undefined && options.courseId !== null
+        ? String(options.courseId)
+        : null;
 
     const shouldLoadFaq = sourceType === 'all' || sourceType === 'faq';
     const shouldLoadActivity = sourceType === 'all' || sourceType === 'activity';
     const shouldLoadChunks = sourceType === 'all' || sourceType === 'document_chunk';
 
     // 1. Tarik data secara kondisional
-    const [faqs, activities, chunks] = await Promise.all([
+    const [faqs, activities, chunksRaw] = await Promise.all([
       shouldLoadFaq ? faqModel.findByProjectId(projectId) : Promise.resolve([]),
       shouldLoadActivity ? activityModel.findByProjectId(projectId) : Promise.resolve([]),
       shouldLoadChunks ? chunkModel.findByProjectId(projectId) : Promise.resolve([])
     ]);
+
+    // Filter chunk ke course aktif. Chunk tanpa moodle_course_id (materi lama/manual)
+    // TIDAK dibuang agar tak menghilangkan materi yang belum ter-tag course.
+    let chunks = chunksRaw;
+    if (courseId) {
+      const scoped = chunksRaw.filter((c) => {
+        const cid = getChunkCourseId(c);
+        return cid === null || cid === courseId;
+      });
+      // Jaring pengaman: kalau setelah difilter materi course ini kosong total
+      // (mis. course belum disinkron), jangan kosongkan — pakai semua chunk apa adanya.
+      chunks = scoped.length > 0 ? scoped : chunksRaw;
+    }
 
     let results = [];
 
