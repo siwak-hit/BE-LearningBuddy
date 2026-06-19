@@ -163,7 +163,7 @@ const externalLoaderService = {
       '  right: 96px;',
       // [v0.9.25] Dinaikkan sedikit (24→34px) agar sejajar dengan tombol bundar bawaan
       // LMS (accessibility / back-to-top) di pojok kanan bawah.
-      '  bottom: 34px;',
+      '  bottom: 39px;',
       '  z-index: 999999;',
       '  border: none;',
       '  border-radius: 9999px;',
