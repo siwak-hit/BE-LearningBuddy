@@ -11,6 +11,7 @@ const lmsContextService = require('../services/moodle/lms-context.service');
 const documentModel = require('../models/document.model');
 const moodleService = require('../services/moodle/moodle.service');
 const lmsRouteModel = require('../models/lmsRoute.model');
+const moodleConfigModel = require('../models/moodleConfig.model');
 const difficultyService = require('../services/ai/difficulty.service');
 const recommendationService = require('../services/ai/recommendation.service');
 
@@ -637,6 +638,31 @@ const chatController = {
 
     console.log('[QuizDispute] submit result:', JSON.stringify({ reason: r.reason || 'ok', ctxUser: ctx.userId, ctxCourse: ctx.courseId, debug: r.debug || null }));
     return response.success(res, 'Hasil sengketa kuis', { ok: r.ok === true, reason: r.reason || null, debug: r.debug || null, botMessage: { message, actions } }, 200);
+  }),
+
+  // [v0.9.37] Opsi KELAS untuk dropdown verifikasi siswa. Value = course_id (otoritatif),
+  // label = kode kelas. Tujuan: user pilih "9A" → sistem kirim course_id 13 langsung, tak
+  // perlu mencocokkan string "9A" (yang dulu gagal & bikin "siswa tidak ditemukan").
+  getClassOptions: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    let courseMap = {};
+    try {
+      const config = await moodleConfigModel.findByProjectId(session.project_id);
+      courseMap = (config && config.course_map) || {};
+    } catch (e) { console.warn('[ClassOptions] getConfig gagal:', e.message); }
+
+    // Urutkan natural (8A, 8B, …, 9A). Value = course_id.
+    const classes = Object.entries(courseMap)
+      .map(([classCode, courseId]) => ({ class_code: String(classCode).toUpperCase(), course_id: Number(courseId) }))
+      .filter((c) => c.class_code && c.course_id)
+      .sort((a, b) => a.class_code.localeCompare(b.class_code, undefined, { numeric: true }));
+
+    return response.success(res, 'Opsi kelas', { classes }, 200);
   }),
 
   // [v0.9.26 #A] Daftar siswa terdaftar (enrolled) di course sesi — untuk dropdown fallback
