@@ -7,6 +7,7 @@ const moodleConfigModel = require('../../models/moodleConfig.model');
 const chunkingService = require('../rag/chunking.service');
 const textCleanerService = require('../document/text-cleaner.service');
 const supabaseService = require('../supabase/supabase.service');
+const moodleStudentModel = require('../../models/moodleStudent.model');
 
 const SUPPORTED_ACTIVITY_MODS = ['assign', 'quiz', 'forum', 'page', 'resource', 'label', 'book', 'url', 'folder'];
 const MATERIAL_MODS = ['page', 'resource', 'label', 'book'];
@@ -558,6 +559,48 @@ const moodleContentSyncService = {
     return summary;
   },
 
+  // [v0.9.40] Bangun INDEKS LOKAL siswa (email→user/kelas) supaya verifikasi siswa cepat
+  // (tanpa panggil Moodle live tiap kali). Ambil enrolled users per course SEKALI saat sync.
+  async syncStudentDirectory(projectId) {
+    const config = await moodleService.getConfig(projectId);
+    const courseMap = config.course_map || {};
+    const entries = Object.entries(courseMap)
+      .map(([classCode, courseId]) => ({ classCode: String(classCode).toUpperCase(), courseId: Number(courseId) }))
+      .filter((e) => e.courseId);
+
+    const rows = [];
+    let coursesOk = 0;
+    for (const e of entries) {
+      let users = [];
+      try { users = await moodleService.getEnrolledUsers(projectId, e.courseId); coursesOk += 1; }
+      catch (err) { console.warn(`[StudentDir] getEnrolledUsers course ${e.courseId} gagal:`, err.message); continue; }
+
+      (Array.isArray(users) ? users : []).forEach((u) => {
+        const roles = Array.isArray(u.roles) ? u.roles : [];
+        const isStudent = !roles.length || roles.some((r) => /student|siswa/i.test(String(r.shortname || r.name || '')));
+        if (!isStudent || !u.id) return;
+        rows.push({
+          project_id: projectId,
+          course_id: e.courseId,
+          class_code: e.classCode,
+          moodle_user_id: u.id,
+          email: String(u.email || '').trim().toLowerCase() || null,
+          username: String(u.username || '').trim().toLowerCase() || null,
+          fullname: u.fullname || [u.firstname, u.lastname].filter(Boolean).join(' ').trim() || null,
+          idnumber: String(u.idnumber || '').trim().toLowerCase() || null
+        });
+      });
+    }
+
+    let stored = 0;
+    try { stored = await moodleStudentModel.replaceForProject(projectId, rows); }
+    catch (err) { console.warn('[StudentDir] simpan direktori gagal:', err.message); }
+
+    const withEmail = rows.filter((r) => r.email).length;
+    console.log('[StudentDir] built:', JSON.stringify({ projectId, courses: entries.length, coursesOk, students: rows.length, withEmail }));
+    return { courses: entries.length, coursesOk, students: stored, withEmail };
+  },
+
   async syncAllCourses(projectId, options = {}) {
     const config = await moodleService.getConfig(projectId);
     let courseMap = config.course_map || {};
@@ -647,6 +690,15 @@ const moodleContentSyncService = {
       totalSummary.byClass[classCode] = res;
 
       if (res.errors.length > 0) totalSummary.errors.push(...res.errors.map((message) => `${classCode}: ${message}`));
+    }
+
+    // [v0.9.40] Sekalian bangun indeks siswa untuk verifikasi cepat (tak menggagalkan sync
+    // materi bila error).
+    try {
+      totalSummary.studentDirectory = await this.syncStudentDirectory(projectId);
+    } catch (e) {
+      console.warn('[Moodle Sync] Bangun indeks siswa gagal:', e.message);
+      totalSummary.studentDirectory = { error: e.message };
     }
 
     return totalSummary;

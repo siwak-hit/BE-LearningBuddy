@@ -1,4 +1,5 @@
 const moodleConfigModel = require('../../models/moodleConfig.model');
+const moodleStudentModel = require('../../models/moodleStudent.model');
 
 const MOODLE_REQUEST_TIMEOUT_MS = parseInt(process.env.MOODLE_REQUEST_TIMEOUT_MS || '18000', 10);
 const MOODLE_RESOLVE_CACHE_TTL_MS = parseInt(process.env.MOODLE_RESOLVE_CACHE_TTL_MS || '600000', 10);
@@ -28,6 +29,45 @@ function chunkArray(items = [], size = 3) {
   const chunks = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
+}
+
+// [v0.9.40] Bentuk hasil resolve dari baris INDEKS LOKAL (moodle_students). Satu siswa bisa
+// punya beberapa baris (beberapa course). Prioritaskan course yang dipilih sebagai primary.
+function buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, config) {
+  // Kalau pencocokan kena beberapa user (mis. username = local-part orang lain), utamakan
+  // yang email-nya persis sama; lalu ambil semua baris milik user itu.
+  const exact = dirRows.filter((r) => r.email && r.email === targetEmail);
+  const seedUserId = (exact[0] || dirRows[0]).moodle_user_id;
+  const userRows = dirRows.filter((r) => String(r.moodle_user_id) === String(seedUserId));
+  const base = userRows[0];
+  const baseUrl = getMoodleBaseUrl(config?.rest_endpoint);
+
+  const enrolled = userRows.map((r) => ({
+    class_code: r.class_code || null,
+    course_id: r.course_id,
+    course_title: r.class_code ? `Informatika ${r.class_code}` : null,
+    course_url: `${baseUrl}/course/view.php?id=${r.course_id}`,
+    roles: ['student']
+  }));
+
+  let primary = enrolled[0];
+  if (requestedCourseId) {
+    const p = enrolled.find((c) => Number(c.course_id) === Number(requestedCourseId));
+    if (p) primary = p;
+  }
+
+  return {
+    found: true,
+    moodle_user_id: base.moodle_user_id,
+    username: base.username || null,
+    fullname: base.fullname || (base.email ? base.email.split('@')[0] : (base.username || targetEmail.split('@')[0])),
+    email: base.email || targetEmail,
+    class_code: primary?.class_code || null,
+    course_id: primary?.course_id || null,
+    course_title: primary?.course_title || null,
+    enrolled_courses: enrolled,
+    source: 'directory'
+  };
 }
 
 
@@ -336,6 +376,30 @@ const moodleService = {
 
     const config = await moodleService.getConfig(projectId);
     const courseMap = config.course_map || {};
+
+    // [v0.9.40] INDEKS LOKAL dulu (cepat). Hindari menarik ~200 peserta × 9 course dari
+    // Moodle live tiap verifikasi (penyebab request lama/timeout). Indeks diisi saat sync.
+    try {
+      const dirRows = await moodleStudentModel.findByIdentifier(projectId, targetEmail);
+      if (dirRows && dirRows.length) {
+        const result = buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, config);
+        writeStudentResolveCache(cacheKey, result);
+        return result;
+      }
+      // Indeks SUDAH terisi tapi email tak ada → jawab cepat "tidak ditemukan" (jangan bebani
+      // Moodle live). Indeks KOSONG (belum pernah sinkron) → lanjut pencarian live (sekali).
+      const populated = await moodleStudentModel.existsForProject(projectId);
+      if (populated) {
+        return {
+          found: false, email: targetEmail,
+          class_code: requestedClassCode || null, course_id: requestedCourseId || null,
+          message: 'Email tidak terdaftar sebagai siswa (menurut data kelas tersinkron). Kalau kamu baru didaftarkan di VClass, minta admin Sinkron Moodle ulang.',
+          source: 'directory_miss', debug: []
+        };
+      }
+    } catch (e) {
+      console.warn('[ResolveStudent] indeks lokal gagal, fallback live:', e.message);
+    }
 
     // SEMUA course yang termapping (label kelas pakai key course_map apa adanya bila tak
     // bisa dinormalisasi, mis. "9A").
