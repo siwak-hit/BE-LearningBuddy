@@ -570,24 +570,36 @@ const moodleContentSyncService = {
 
     const rows = [];
     let coursesOk = 0;
-    for (const e of entries) {
-      let users = [];
-      try { users = await moodleService.getEnrolledUsers(projectId, e.courseId); coursesOk += 1; }
-      catch (err) { console.warn(`[StudentDir] getEnrolledUsers course ${e.courseId} gagal:`, err.message); continue; }
 
-      (Array.isArray(users) ? users : []).forEach((u) => {
-        const roles = Array.isArray(u.roles) ? u.roles : [];
-        const isStudent = !roles.length || roles.some((r) => /student|siswa/i.test(String(r.shortname || r.name || '')));
-        if (!isStudent || !u.id) return;
-        rows.push({
-          project_id: projectId,
-          course_id: e.courseId,
-          class_code: e.classCode,
-          moodle_user_id: u.id,
-          email: String(u.email || '').trim().toLowerCase() || null,
-          username: String(u.username || '').trim().toLowerCase() || null,
-          fullname: u.fullname || [u.firstname, u.lastname].filter(Boolean).join(' ').trim() || null,
-          idnumber: String(u.idnumber || '').trim().toLowerCase() || null
+    // Ambil enrolled users beberapa course PARALEL (batch) supaya tak menunggu 9 course
+    // satu-satu (penyebab lama). Concurrency kecil agar tak membebani Moodle.
+    const CONCURRENCY = 4;
+    for (let i = 0; i < entries.length; i += CONCURRENCY) {
+      const batch = entries.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(batch.map((e) =>
+        moodleService.getEnrolledUsers(projectId, e.courseId).then((users) => ({ e, users }))
+      ));
+      results.forEach((result) => {
+        if (result.status !== 'fulfilled') {
+          console.warn('[StudentDir] getEnrolledUsers gagal:', result.reason?.message || result.reason);
+          return;
+        }
+        coursesOk += 1;
+        const { e, users } = result.value;
+        (Array.isArray(users) ? users : []).forEach((u) => {
+          const roles = Array.isArray(u.roles) ? u.roles : [];
+          const isStudent = !roles.length || roles.some((r) => /student|siswa/i.test(String(r.shortname || r.name || '')));
+          if (!isStudent || !u.id) return;
+          rows.push({
+            project_id: projectId,
+            course_id: e.courseId,
+            class_code: e.classCode,
+            moodle_user_id: u.id,
+            email: String(u.email || '').trim().toLowerCase() || null,
+            username: String(u.username || '').trim().toLowerCase() || null,
+            fullname: u.fullname || [u.firstname, u.lastname].filter(Boolean).join(' ').trim() || null,
+            idnumber: String(u.idnumber || '').trim().toLowerCase() || null
+          });
         });
       });
     }
@@ -692,14 +704,9 @@ const moodleContentSyncService = {
       if (res.errors.length > 0) totalSummary.errors.push(...res.errors.map((message) => `${classCode}: ${message}`));
     }
 
-    // [v0.9.40] Sekalian bangun indeks siswa untuk verifikasi cepat (tak menggagalkan sync
-    // materi bila error).
-    try {
-      totalSummary.studentDirectory = await this.syncStudentDirectory(projectId);
-    } catch (e) {
-      console.warn('[Moodle Sync] Bangun indeks siswa gagal:', e.message);
-      totalSummary.studentDirectory = { error: e.message };
-    }
+    // [v0.9.40.1] Indeks siswa TIDAK lagi dibangun di sini — dipisah ke endpoint sendiri
+    // (`/moodle/sync/students`) agar sync materi tak ikut timeout. FE memanggilnya terpisah
+    // setelah sync materi selesai.
 
     return totalSummary;
   },

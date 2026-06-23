@@ -342,6 +342,19 @@ const moodleController = {
     } catch (error) {
       return response.error(res, 'Gagal sync semua course', error.message, 500);
     }
+  },
+
+  // [v0.9.40.1] Bangun INDEKS siswa terpisah dari sync materi (biar tak ikut timeout).
+  async syncStudents(req, res) {
+    try {
+      const { projectId } = req.body;
+      if (!projectId) return response.error(res, 'Missing projectId', null, 400);
+
+      const result = await moodleContentSyncService.syncStudentDirectory(projectId);
+      return response.success(res, 'Indeks siswa diperbarui', result);
+    } catch (error) {
+      return response.error(res, 'Gagal membangun indeks siswa', error.message, 500);
+    }
   }
 };
 

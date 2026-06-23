@@ -17,6 +17,7 @@ router.post('/courses/sync-map', requireAuth, moodleController.syncCourseMap);
 router.get('/course-contents', requireAuth, moodleController.getCourseContents);
 router.post('/sync/course', requireAuth, moodleController.syncCourse);
 router.post('/sync/all', requireAuth, moodleController.syncAll);
+router.post('/sync/students', requireAuth, moodleController.syncStudents); // [v0.9.40.1] indeks siswa terpisah
 
 router.get('/preview-materials', requireAuth, moodleController.previewMaterials);
 router.get('/chunks', requireAuth, moodleController.getProjectChunks);
