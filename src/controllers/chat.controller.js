@@ -134,7 +134,7 @@ const chatController = {
     const shortCode = sessionKey.substring(5, 8).toUpperCase();
 
     // Mapping Moodle Course ID ke Kelas
-    const courseMap = { '2': '8A', '3': '8B', '4': '8C', '6': '8D', '7': '8E', '9': '8F', '8': '8G', '5': '8H' };
+    const courseMap = { '2': '8A', '3': '8B', '4': '8C', '6': '8D', '7': '8E', '9': '8F', '8': '8G', '5': '8H', '13': '9A' };
     let autoClassCode = null;
     let autoStudentName = null;
 
@@ -197,7 +197,12 @@ const chatController = {
     const studentEmail = String(sessionMeta.email || '').trim().toLowerCase();
     const studentClass = String(sessionMeta.class_code || autoClassCode || '').trim().toUpperCase();
 
-    if (studentEmail && studentClass) {
+    // [#3] Ganti course = PAKSA sesi baru. Tanpa ini, blok reuse harian di bawah akan
+    // mengembalikan sesi LAMA (course lama) untuk email+kelas yang sama di hari yang sama
+    // → course tak pernah benar-benar berpindah.
+    const forceNewSession = req.body.switchCourse === true || req.body.forceNew === true;
+
+    if (!forceNewSession && studentEmail && studentClass) {
       try {
         const existing = await studentSessionRegistryModel.findActive(projectId, studentEmail, studentClass);
         if (existing?.session_id && isSameJakartaDay(existing.updated_at)) {
@@ -402,7 +407,10 @@ const chatController = {
       .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, ' ').trim();
     const stripHtml = (s) => decodeEntities(String(s || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
     const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-    const MATERI_MODNAMES = ['page', 'resource', 'book', 'url', 'folder'];
+    // [#2] @materi HANYA modname `page` (materi HTML yang diketik guru & dibaca langsung
+    // di VClass). Selaras dengan chunking page-only — resource/file/url/folder tak masuk
+    // daftar @ supaya tak ada item tanpa isi yang bisa di-rangkum AI.
+    const MATERI_MODNAMES = ['page'];
 
     // [v0.7.3] Status penyelesaian materi OLEH SISWA (core_completion_get_activities_completion_status).
     // Hanya materi yang sudah DISELESAIKAN siswa yang masuk daftar @materi.

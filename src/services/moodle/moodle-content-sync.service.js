@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const moodleService = require('./moodle.service');
 const documentModel = require('../../models/document.model');
 const chunkModel = require('../../models/chunk.model');
@@ -9,6 +10,19 @@ const supabaseService = require('../supabase/supabase.service');
 
 const SUPPORTED_ACTIVITY_MODS = ['assign', 'quiz', 'forum', 'page', 'resource', 'label', 'book', 'url', 'folder'];
 const MATERIAL_MODS = ['page', 'resource', 'label', 'book'];
+// [A] Default HANYA modname `page` yang di-chunk ke RAG. `page` = materi HTML yang diketik
+// guru & dibaca langsung di layar VClass. `resource` = file unggahan (PDF/PPT/Docx) yang
+// harus di-download. Admin bisa memilih ikut meng-chunk `resource` (lihat resolveChunkMods).
+const CHUNK_MODS = ['page'];
+
+// [dedup] Hash konten ter-normalisasi → mendeteksi materi yang ISInya identik di banyak
+// course (mis. "Kisi-kisi ASAT"/Pengumuman yang sama persis di kelas 8A–8H). Cukup simpan
+// SATU; salinan itu dijadikan lintas-course (moodle_course_id null) agar muncul di kelas
+// manapun yang isinya sama.
+function contentHash(text = '') {
+  const norm = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return crypto.createHash('sha1').update(norm).digest('hex');
+}
 
 function toIsoDate(unixTime) {
   const value = Number(unixTime || 0);
@@ -311,10 +325,17 @@ const moodleContentSyncService = {
       chunksCreated: 0,
       routesUpdated: 0,
       skippedTooShort: 0,
+      skippedHidden: 0,
+      skippedDuplicate: 0,
       errors: []
     };
 
     const materialOnly = options.materialOnly !== false;
+    // [setting] modname yang di-chunk: default `page`; admin bisa ikutkan `resource`.
+    const chunkMods = options.includeResource === true ? ['page', 'resource'] : CHUNK_MODS;
+    // [dedup] Map konten-identik lintas course. Dibagikan dari syncAllCourses; bila dipanggil
+    // sendiri, pakai Map lokal.
+    const seenContent = options.seenContent instanceof Map ? options.seenContent : new Map();
 
     try {
       const config = await moodleService.getConfig(projectId);
@@ -373,6 +394,17 @@ const moodleContentSyncService = {
           if (!SUPPORTED_ACTIVITY_MODS.includes(modname)) continue;
           if (materialOnly && !MATERIAL_MODS.includes(modname)) continue;
 
+          // [#2] HANYA index materi yang TAMPIL untuk siswa di VClass.
+          // `visible === 0` = guru menyembunyikan aktivitas (ikon mata) → tak terlihat
+          // siapa pun; `visibleoncoursepage === 0` = stealth/disembunyikan dari halaman
+          // kursus. Materi tersembunyi tak boleh ikut di-chunk / dipakai AI.
+          const isHiddenFromStudents =
+            Number(module.visible) === 0 || module.visibleoncoursepage === 0;
+          if (isHiddenFromStudents) {
+            summary.skippedHidden += 1;
+            continue;
+          }
+
           const cmid = Number(module.id || 0);
           let detail = null;
           let deadline = null;
@@ -409,24 +441,41 @@ const moodleContentSyncService = {
             if (row) activities.push(row);
           }
 
+          // [A/setting] Default hanya `page`; bila admin pilih ikutkan `resource`, ambil juga
+          // teks file (PDF/dll) lewat getResourceHtmlFromDetail.
           let rawHtml = '';
-          if (MATERIAL_MODS.includes(modname) || module.description) {
+          if (chunkMods.includes(modname)) {
             rawHtml += module.description || '';
             rawHtml += ' ';
             rawHtml += detail?.content || detail?.intro || '';
-
             if (modname === 'resource') {
               rawHtml += ' ';
               rawHtml += await this.getResourceHtmlFromDetail(detail || {}, config);
             }
           }
 
-          if (!rawHtml) continue;
+          if (!rawHtml.trim()) continue;
 
           const cleanText = textCleanerService.clean(this.htmlToPlainText(rawHtml));
 
           if (cleanText.length < 80) {
             summary.skippedTooShort += 1;
+            continue;
+          }
+
+          // [dedup] Konten identik yang muncul di banyak course (mis. Pengumuman/Kisi-kisi
+          // yang sama persis di 8A–8H) cukup disimpan SEKALI. Saat ketemu lagi → lewati buat
+          // dokumen baru, lalu tandai salinan pertama sebagai lintas-course (null course tag)
+          // supaya tetap muncul untuk kelas manapun yang isinya sama.
+          const cHash = contentHash(cleanText);
+          const seen = seenContent.get(cHash);
+          if (seen) {
+            seen.count += 1;
+            if (seen.count === 2 && seen.docId) {
+              try { await chunkModel.setCourseAgnostic(seen.docId); }
+              catch (e) { console.warn('[Dedup] set course-agnostic gagal:', e.message); }
+            }
+            summary.skippedDuplicate += 1;
             continue;
           }
 
@@ -484,6 +533,9 @@ const moodleContentSyncService = {
             await chunkModel.createMany(chunkPayloads);
             summary.materialsSynced += 1;
             summary.chunksCreated += chunkPayloads.length;
+            // [dedup] Catat konten ini sebagai salinan pertama (kalau muncul lagi di course
+            // lain → akan di-skip & dijadikan lintas-course).
+            seenContent.set(cHash, { docId, count: 1 });
           }
         }
       }
@@ -551,10 +603,15 @@ const moodleContentSyncService = {
       chunksCreated: 0,
       routesUpdated: 0,
       skippedTooShort: 0,
+      skippedHidden: 0,
+      skippedDuplicate: 0,
       deletedMoodleDocs,
       byClass: {},
       errors: []
     };
+
+    // [dedup] Map BERSAMA antar course agar konten identik lintas-kelas hanya disimpan sekali.
+    const seenContent = new Map();
 
     let allCourses = [];
     if (!options.skipCourseInfo) {
@@ -571,7 +628,8 @@ const moodleContentSyncService = {
       const res = await this.syncCourseContent(projectId, classCode, courseId, {
         ...options,
         resetMoodleChunks: false,
-        courseInfo
+        courseInfo,
+        seenContent
       });
 
       totalSummary.coursesProcessed += 1;
@@ -584,6 +642,8 @@ const moodleContentSyncService = {
       totalSummary.chunksCreated += res.chunksCreated;
       totalSummary.routesUpdated += res.routesUpdated;
       totalSummary.skippedTooShort += res.skippedTooShort;
+      totalSummary.skippedHidden += res.skippedHidden || 0;
+      totalSummary.skippedDuplicate += res.skippedDuplicate || 0;
       totalSummary.byClass[classCode] = res;
 
       if (res.errors.length > 0) totalSummary.errors.push(...res.errors.map((message) => `${classCode}: ${message}`));
@@ -601,23 +661,20 @@ const moodleContentSyncService = {
       try {
         const dataset = await this.getMoodleDataset(projectId, courseId, { includeActivities: false });
         const pageByCmid = indexByModuleId(dataset.pages, (item) => item.coursemodule);
-        const resourceByCmid = indexByModuleId(dataset.resources, (item) => item.coursemodule);
 
         for (const section of dataset.contents) {
           if (!section.modules) continue;
 
           for (const module of section.modules) {
             const modname = String(module.modname || '').toLowerCase();
-            if (!MATERIAL_MODS.includes(modname) && !module.description) continue;
+            // [A] Preview hanya `page` (selaras dengan yang benar-benar di-chunk).
+            if (!CHUNK_MODS.includes(modname)) continue;
+
+            // [#2] Lewati materi yang disembunyikan dari siswa (selaras dengan syncCourseContent).
+            if (Number(module.visible) === 0 || module.visibleoncoursepage === 0) continue;
 
             const pageDetail = pageByCmid.get(Number(module.id));
-            const resourceDetail = resourceByCmid.get(Number(module.id));
-            let rawHtml = [module.description || '', pageDetail?.content || pageDetail?.intro || '', resourceDetail?.intro || ''].join(' ');
-
-            if (modname === 'resource') {
-              rawHtml += ' ';
-              rawHtml += await this.getResourceHtmlFromDetail(resourceDetail || {}, config);
-            }
+            const rawHtml = [module.description || '', pageDetail?.content || pageDetail?.intro || ''].join(' ');
 
             const plainText = this.htmlToPlainText(rawHtml);
             if (plainText.length < 80) continue;

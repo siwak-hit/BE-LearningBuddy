@@ -318,10 +318,12 @@ const moodleController = {
 
   async syncCourse(req, res) {
     try {
-      const { projectId, classCode, courseId, resetMoodleChunks } = req.body;
+      const { projectId, classCode, courseId, resetMoodleChunks, includeResource } = req.body;
       if (!projectId || !classCode || !courseId) return response.error(res, 'Missing parameters', null, 400);
 
-      const summary = await moodleContentSyncService.syncCourseContent(projectId, classCode, courseId, { resetMoodleChunks });
+      const summary = await moodleContentSyncService.syncCourseContent(projectId, classCode, courseId, {
+        resetMoodleChunks, includeResource: includeResource === true
+      });
       return response.success(res, 'Sync Moodle content selesai', summary);
     } catch (error) {
       return response.error(res, 'Gagal sync course', error.message, 500);
@@ -330,10 +332,12 @@ const moodleController = {
 
   async syncAll(req, res) {
     try {
-      const { projectId, resetMoodleChunks } = req.body;
+      const { projectId, resetMoodleChunks, includeResource } = req.body;
       if (!projectId) return response.error(res, 'Missing projectId', null, 400);
 
-      const summary = await moodleContentSyncService.syncAllCourses(projectId, { resetMoodleChunks });
+      const summary = await moodleContentSyncService.syncAllCourses(projectId, {
+        resetMoodleChunks, includeResource: includeResource === true
+      });
       return response.success(res, 'Sync semua course Moodle selesai', summary);
     } catch (error) {
       return response.error(res, 'Gagal sync semua course', error.message, 500);

@@ -1216,9 +1216,54 @@ function buildMentionSnippet(content = '', keywords = [], maxLen = 280) {
 
 // [v0.9.3] Bedakan "intent" saran lanjutan @materi → tiap jenis punya prompt sendiri,
 // dan masing-masing di-cache terpisah (rangkum/poin/jelaskan/soal).
+// [v0.9.36] Deteksi materi yang isinya HANYA TABEL kisi-kisi / rencana soal ujian (bukan
+// materi penjelasan). Ciri: judul "kisi-kisi", atau konten penuh kolom blueprint
+// (Capaian Pembelajaran / Indikator Soal / Level Kognitif / Nomor Soal), banyak "Peserta
+// didik dapat...", banyak penanda level kognitif C1–C6. Untuk materi seperti ini, AI tak
+// boleh "merangkum konsep" (seolah materi mengajarkannya) — harus menjelaskan MAKSUD TABEL.
+function detectBlueprintTable(text = '', title = '') {
+  const t = String(text || '').toLowerCase();
+  const ti = String(title || '').toLowerCase();
+  if (/kisi\s*-?\s*kisi|blueprint/.test(ti)) return true;
+  let signals = 0;
+  if (/capaian pembelajaran/.test(t)) signals += 1;
+  if (/indikator soal/.test(t)) signals += 1;
+  if (/level kognitif/.test(t)) signals += 1;
+  if (/nomor soal/.test(t)) signals += 1;
+  if ((t.match(/peserta didik dapat/g) || []).length >= 3) signals += 1;
+  if ((t.match(/\bc[1-6]\b/g) || []).length >= 3) signals += 1;
+  return signals >= 3;
+}
+
+// Prompt khusus tabel kisi-kisi: jelaskan MAKSUD tabel (panduan belajar/ujian), JANGAN
+// merangkum topik-topiknya seolah materi ini mengajarkan konsep tersebut.
+function buildBlueprintTablePrompt(label, materiContent, cleanQ) {
+  return `Kamu AI Learning Buddy untuk siswa SMP. Bahasa Indonesia sederhana, ramah, **bold** untuk poin penting.
+
+PENTING: Materi "${label}" ini BUKAN bab materi pelajaran — ini adalah **TABEL KISI-KISI / rencana soal ujian** (daftar topik yang akan diujikan beserta indikator, level kognitif C1–C6, dan nomor soal). JANGAN menjelaskan konsep-konsepnya seolah materi ini yang mengajarkannya. Tugasmu MENJELASKAN MAKSUD TABEL ini.
+
+Lakukan:
+1) Awali dengan jelas: ini **kisi-kisi ujian** (panduan belajar), bukan materi pelajaran biasa.
+2) Jelaskan singkat arti kolomnya: Capaian Pembelajaran, Materi yang diuji, Indikator Soal (apa yang harus bisa), Level Kognitif (C1–C6 = dari mengingat sampai mencipta), Nomor Soal.
+3) Sebutkan **daftar topik yang akan diujikan** (ambil dari kolom "Materi") sebagai poin-poin yang perlu dipelajari siswa — JANGAN dijelaskan konsepnya, cukup didaftar.
+4) Bila ada, sebut total jumlah soal / cakupan ujian.
+5) Tutup: ajak siswa mempelajari topik-topik itu dari materi terkait sebelum ujian.
+
+Pakai HANYA isi tabel di bawah, jangan mengarang.
+
+Pertanyaan siswa: ${cleanQ}
+
+=== ISI TABEL "${label}" ===
+${materiContent}`;
+}
+
 function detectMentionTask(message = '') {
   const t = String(message || '').toLowerCase();
   if (/\b(rangkum|ringkas|ringkasan|rangkuman|resume|kesimpulan|simpulkan|garis besar)\b/.test(t)) return 'summary';
+  // [#4] "ini tuh tentang apa sih materinya?" / "isinya apa" / "bahas apa" / "materinya apa"
+  // = minta GAMBARAN UMUM materi → perlakukan sebagai rangkuman (overview), bukan tanya-jawab
+  // keyword spesifik yang sering berakhir "tidak ditemukan".
+  if (/(tentang apa|isinya apa|apa isi|bahas apa|membahas apa|materinya apa|apa sih materi|maksud(nya)? apa|menjelaskan apa|berisi apa|ngebahas apa|ini materi apa)/.test(t)) return 'summary';
   if (/(poin penting|poin-poin|poin penting materi|kata kunci|inti dari|intinya|poin utama)/.test(t)) return 'keypoints';
   if (/(buat|bikin|berikan).{0,20}(soal|latihan|kuis|pertanyaan)|soal latihan/.test(t)) return 'quiz';
   if (/(jelaskan|terangkan).{0,30}(sederhana|mudah|gampang)|bahasa sederhana|jelaskan materi ini|jelaskan keseluruhan|jelaskan semua/.test(t)) return 'simplify';
@@ -2627,10 +2672,33 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
 
       // 1) Ambil isi dokumen target LANGSUNG via document_id (tidak bergantung skor).
       //    Inilah sumber kebenaran untuk rangkuman & jawaban AI atas materi tsb.
+      let resolvedDocumentId = mention.documentId || null;
       let targetChunks = [];
-      if (mention.documentId) {
-        try { targetChunks = await chunkModel.findByDocumentId(mention.documentId); }
+      if (resolvedDocumentId) {
+        try { targetChunks = await chunkModel.findByDocumentId(resolvedDocumentId); }
         catch (e) { console.error('[Mention] ambil chunk dokumen gagal:', e.message); }
+      }
+
+      // [#4] Fallback: @materi kadang tak membawa document_id (pencocokan url/judul gagal
+      // saat daftar dibangun). Coba resolusi dokumen via url/judul lalu ambil chunk-nya,
+      // supaya pertanyaan "tentang apa materi ini" tetap bisa dijawab, bukan "tidak ditemukan".
+      if (!targetChunks.length) {
+        try {
+          const mUrl = String(mention.sourceUrl || mention.url || '').trim();
+          const mTitle = String(mention.title || mention.label || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+          if (mUrl || mTitle) {
+            const allDocs = (await documentModel.findByProjectId(projectId)) || [];
+            const docMatch = allDocs.find((d) => {
+              if (mUrl && String(d.source_url || '').trim() === mUrl) return true;
+              const dt = String(d.title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+              return mTitle && dt && (dt === mTitle || dt.includes(mTitle) || mTitle.includes(dt));
+            });
+            if (docMatch?.id) {
+              resolvedDocumentId = docMatch.id;
+              targetChunks = await chunkModel.findByDocumentId(docMatch.id);
+            }
+          }
+        } catch (e) { console.warn('[Mention] fallback resolusi dokumen gagal:', e.message); }
       }
 
       // 2) Retrieval tetap dipakai untuk jalur tanya-jawab spesifik (snippet + highlight).
@@ -2641,7 +2709,7 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       } catch (e) { console.error('[Mention] retrieve gagal:', e.message); }
 
       // Cocokkan dokumen target via document_id (paling akurat) ATAU source_url / judul.
-      const targetId = mention.documentId ? String(mention.documentId) : '';
+      const targetId = resolvedDocumentId ? String(resolvedDocumentId) : '';
       const targetUrl = String(mention.sourceUrl || mention.url || '').trim();
       const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
       const targetTitle = normTitle(mention.title || mention.label);
@@ -2679,8 +2747,12 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       // Cache dulu: kalau sudah pernah dijawab → kembalikan tanpa kuota AI (berlaku walau habis).
       // Kalau belum → hit AI lalu SIMPAN ke cache.
       if (wantsAiKind && materiContent) {
-        const docKey = String(mention.documentId || targetUrl || label || '').toLowerCase().slice(0, 120);
-        const cacheCtxHash = `mention:${docKey}`;
+        const docKey = String(resolvedDocumentId || targetUrl || label || '').toLowerCase().slice(0, 120);
+        // [v0.9.36] Materi yang isinya tabel kisi-kisi → AI jelaskan MAKSUD tabel, bukan
+        // merangkum topiknya jadi konsep. Cache di-pisah (':blueprint') agar tak memakai
+        // jawaban lama yang salah (mis. rangkuman "Media Sosial" untuk tabel kisi-kisi).
+        const isBlueprint = detectBlueprintTable(materiContent, label);
+        const cacheCtxHash = `mention:${docKey}${isBlueprint ? ':blueprint' : ''}`;
         const normalizedQ = mentionTask ? `${mentionTask} materi ${docKey}` : aiResponseCacheModel.normalizeQuestion(cleanQ);
         const mentionCacheKey = aiResponseCacheModel.buildCacheKey(projectId, normalizedQ, cacheCtxHash);
         // [v0.9.8] Tombol "buat yang baru" per task — minta hasil berbeda dgn konteks sama.
@@ -2719,7 +2791,9 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
 
         // 2) Tidak ada di cache → hit AI bila tersedia, lalu SIMPAN.
         if (aiAvailable) {
-          const aiPrompt = buildMentionTaskPrompt(mentionTask, label, materiContent, cleanQ);
+          const aiPrompt = isBlueprint
+            ? buildBlueprintTablePrompt(label, materiContent, cleanQ)
+            : buildMentionTaskPrompt(mentionTask, label, materiContent, cleanQ);
           try {
             const geminiResult = await aiQueueService.add(() => geminiService.generateWithFallback(aiPrompt), { sessionId, intent: 'penjelasan_materi', responseMode });
             if (geminiResult.ok) {
@@ -3078,7 +3152,14 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
     let usedModel = null;
 
     try {
-      const prompt = promptService.buildPrompt(effectiveMessage, contextString, pageContext, detectedIntent, elementContext, '', responseMode, lmsContext);
+      // [v0.9.36] Materi yang isinya tabel kisi-kisi → jelaskan MAKSUD tabel, jangan
+      // merangkum topiknya seolah diajarkan (sama seperti jalur @materi).
+      const firstMat = retrievalResults[0] || {};
+      const isBlueprintMaterial = shouldForceMaterialRetrieval
+        && detectBlueprintTable(firstMat.content || firstMat.chunk_text || contextString, firstMat.title || firstMat.topic);
+      const prompt = isBlueprintMaterial
+        ? buildBlueprintTablePrompt(firstMat.title || firstMat.topic || 'Materi ini', contextString, effectiveMessage)
+        : promptService.buildPrompt(effectiveMessage, contextString, pageContext, detectedIntent, elementContext, '', responseMode, lmsContext);
       const geminiResult = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: detectedIntent, responseMode });
 
       if (geminiResult.ok) {
@@ -3097,6 +3178,12 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
           : [...(sysRes.actions || []), ...buildSourceActionsFromRetrieval(retrievalResults, retrievalQuery)];
         if (shouldForceMaterialRetrieval && retrievalResults.length > 0) {
           const firstMaterial = retrievalResults[0] || {};
+          // Jawaban AI = penjelasan hasil olahan + REFERENSI materi sumbernya (jelaskan
+          // dulu, baru tunjuk sumbernya). Tombol "Lihat materi" tetap ada di actions.
+          const srcTitle = firstMaterial.title || firstMaterial.topic || firstMaterial.metadata?.module_name;
+          if (srcTitle && !aiTutorialAction) {
+            botMessageText += `\n\n📚 **Sumber materi:** ${srcTitle} — klik tombol di bawah untuk membuka materinya.`;
+          }
           await chatModel.updateSession(sessionId, {
             page_context: {
               ...pageContextState,

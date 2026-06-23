@@ -26,6 +26,12 @@ const chunkingService = {
     return (isShort && hasCoverKeywords && !hasExplanatoryWords);
   },
 
+  // [#5] Chunking PER PERGANTIAN PARAGRAF.
+  // Dasar: tiap paragraf memuat SATU ide pokok (kalimat utama + kalimat penjelas)
+  // dan ditandai dengan baris baru. Maka 1 paragraf = 1 chunk. Pengecualian:
+  //  - Fragmen sangat pendek (mis. sub-judul / kalimat tunggal di bawah minChars)
+  //    digabung ke paragraf BERIKUTNYA agar tetap satu kesatuan gagasan.
+  //  - Paragraf yang melebihi maxChars dipecah per kalimat (tetap dalam paragraf itu).
   chunkText(pagesData, options = {}) {
     // Parameter fallback untuk compatibility format lama (string)
     if (typeof pagesData === 'string') {
@@ -34,8 +40,12 @@ const chunkingService = {
 
     const maxChars = options.maxChars || 1200;
     const minChars = options.minChars || 80;
-    const maxParagraphs = options.maxParagraphs || 3;
     const chunks = [];
+
+    const appendToLast = (text, pageNumber) => {
+      if (chunks.length > 0) chunks[chunks.length - 1].text += `\n${text}`;
+      else chunks.push({ text, page: pageNumber });
+    };
 
     for (const page of pagesData) {
       if (this.isCoverPage(page.text)) {
@@ -43,57 +53,45 @@ const chunkingService = {
       }
 
       const paragraphs = page.text.split(/\n+/).map(p => p.trim()).filter(p => p.length > 0);
-      let currentChunkParams = [];
-      let currentLength = 0;
-      let overlapSentence = "";
+      let carry = ''; // fragmen pendek yang menunggu digabung ke paragraf berikutnya
 
-      const pushChunk = (paragraphsArray) => {
-        let chunkStr = paragraphsArray.join('\n\n');
-        if (chunkStr.length >= minChars) {
-          chunks.push({ text: chunkStr, page: page.pageNumber });
-        }
-      };
+      for (const rawPara of paragraphs) {
+        const para = carry ? `${carry}\n${rawPara}` : rawPara;
+        carry = '';
 
-      for (const p of paragraphs) {
-        if (p.length > maxChars) {
-          if (currentChunkParams.length > 0) pushChunk(currentChunkParams);
-          currentChunkParams = []; currentLength = 0;
-
-          const sentences = this.splitIntoSentences(p);
-          let tempSentenceChunk = [];
-          let tempLen = overlapSentence.length;
-
-          for (const sentence of sentences) {
-            if (tempLen + sentence.length > maxChars && tempSentenceChunk.length > 0) {
-              pushChunk(tempSentenceChunk);
-              tempSentenceChunk = [sentence];
-              tempLen = sentence.length;
-            } else {
-              tempSentenceChunk.push(sentence);
-              tempLen += sentence.length + 1;
-            }
-          }
-          if (tempSentenceChunk.length > 0) pushChunk(tempSentenceChunk);
-          overlapSentence = "";
+        // Masih terlalu pendek → bawa ke paragraf berikutnya (jangan dibuang).
+        if (para.length < minChars) {
+          carry = para;
           continue;
         }
 
-        if (currentChunkParams.length === 0 && overlapSentence) {
-          currentChunkParams.push(overlapSentence);
-          currentLength += overlapSentence.length;
+        // Paragraf normal → satu chunk utuh (satu ide pokok).
+        if (para.length <= maxChars) {
+          chunks.push({ text: para, page: page.pageNumber });
+          continue;
         }
 
-        if (currentLength + p.length > maxChars || currentChunkParams.length >= (maxParagraphs + (overlapSentence ? 1 : 0))) {
-          pushChunk(currentChunkParams);
-          currentChunkParams = overlapSentence ? [overlapSentence, p] : [p];
-          currentLength = (overlapSentence ? overlapSentence.length + 2 : 0) + p.length;
-        } else {
-          currentChunkParams.push(p);
-          currentLength += p.length + 2;
+        // Paragraf terlalu panjang → pecah per kalimat agar tetap di bawah maxChars.
+        const sentences = this.splitIntoSentences(para);
+        let buf = [];
+        let len = 0;
+        const flush = () => {
+          if (!buf.length) return;
+          const text = buf.join(' ').trim();
+          if (text.length >= minChars) chunks.push({ text, page: page.pageNumber });
+          else appendToLast(text, page.pageNumber);
+          buf = []; len = 0;
+        };
+        for (const sentence of sentences) {
+          if (len + sentence.length > maxChars && buf.length > 0) flush();
+          buf.push(sentence);
+          len += sentence.length + 1;
         }
+        flush();
       }
 
-      if (currentChunkParams.length > 0) pushChunk(currentChunkParams);
+      // Sisa fragmen pendek di akhir halaman → tempel ke chunk terakhir.
+      if (carry) appendToLast(carry, page.pageNumber);
     }
 
     // Filter duplikat teks lintas chunk

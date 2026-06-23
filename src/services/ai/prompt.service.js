@@ -75,7 +75,11 @@ const promptService = {
     } else if (answerMode === 'deadline') {
       modeLine = 'MODE: Ingatkan deadline; pakai DATA LMS bila ada, atau cara cek di Moodle.';
     } else {
-      modeLine = `MODE: Jawab dari KONTEKS MATERI. ${FOCUS_RULES[materialFocus] || FOCUS_RULES.umum}`;
+      // [penjelasan materi] AI WAJIB MENGOLAH ULANG isi materi jadi penjelasan sendiri yang
+      // mudah dipahami — BUKAN menyalin kalimat KONTEKS MATERI mentah-mentah (kalau cuma
+      // ingin lihat sumbernya, siswa pakai mode "Jawaban Sistem"). Jawab pertanyaan siswa
+      // dulu dengan bahasa sederhana, baru sistem yang menambahkan tombol sumber materi.
+      modeLine = `MODE: JELASKAN jawaban pertanyaan siswa dengan BAHASAMU SENDIRI yang sederhana & mudah dipahami siswa SMP, berdasarkan KONTEKS MATERI di bawah. DILARANG menyalin kalimat materi mentah-mentah — olah ulang & beri analogi singkat bila perlu. ${FOCUS_RULES[materialFocus] || FOCUS_RULES.umum}`;
       // [v0.9.17] Jangan menolak keras kalau konsep tak persis ada di materi.
       // Untuk pertanyaan edukatif yang masih relevan (konsep, istilah umum, navigasi/UI,
       // pengetahuan dasar), boleh jawab umum yang aman & benar — cukup tandai dengan jujur

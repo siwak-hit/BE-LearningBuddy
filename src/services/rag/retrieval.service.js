@@ -160,13 +160,15 @@ const retrievalService = {
     // TIDAK dibuang agar tak menghilangkan materi yang belum ter-tag course.
     let chunks = chunksRaw;
     if (courseId) {
-      const scoped = chunksRaw.filter((c) => {
+      // STRICT: hanya chunk milik course (kelas) aktif + chunk tanpa tag course (materi
+      // manual lama). JANGAN fall back ke SEMUA chunk saat hasil kosong — itu sumber
+      // kebocoran lintas-kelas: siswa kelas WordPress malah dapat materi Media Sosial
+      // dari kelas lain. Kalau course ini memang belum disinkron → lebih baik "tidak
+      // menemukan materi" (jujur) daripada menjawab dari kelas yang salah.
+      chunks = chunksRaw.filter((c) => {
         const cid = getChunkCourseId(c);
         return cid === null || cid === courseId;
       });
-      // Jaring pengaman: kalau setelah difilter materi course ini kosong total
-      // (mis. course belum disinkron), jangan kosongkan — pakai semua chunk apa adanya.
-      chunks = scoped.length > 0 ? scoped : chunksRaw;
     }
 
     let results = [];
