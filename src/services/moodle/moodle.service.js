@@ -400,16 +400,37 @@ const moodleService = {
         : result;
     }
 
+    // Email kadang DISEMBUNYIKAN oleh web service Moodle (privasi/showuseridentity), jadi
+    // matching JANGAN hanya andalkan user.email. Cocokkan juga username, idnumber, dan
+    // LOCAL-PART email (sebelum @). Banyak sekolah pakai username = email atau local-part.
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const targetLocal = targetEmail.split('@')[0];
+    const userMatchesTarget = (user) => {
+      const email = norm(user.email);
+      const username = norm(user.username);
+      const idnumber = norm(user.idnumber);
+      if (email && email === targetEmail) return true;
+      if (username && (username === targetEmail || username === targetLocal)) return true;
+      if (idnumber && (idnumber === targetEmail || idnumber === targetLocal)) return true;
+      if (email && email.split('@')[0] === targetLocal) return true; // email beda domain, local sama
+      return false;
+    };
+
+    const diagnostics = [];
     async function checkCourse(courseEntry) {
       const users = await moodleService.getEnrolledUsers(projectId, courseEntry.courseId);
-      const found = (Array.isArray(users) ? users : []).find((user) => {
-        const userEmail = String(user.email || '').trim().toLowerCase();
-        const username = String(user.username || '').trim().toLowerCase();
-        return userEmail === targetEmail || username === targetEmail;
-      });
-
-      if (!found) return null;
-      return { user: found, courses: buildMatchedCoursesFromUser(found, courseEntry) };
+      const list = Array.isArray(users) ? users : [];
+      const found = list.find(userMatchesTarget);
+      // Diagnostik: bantu lihat KENAPA gagal (mis. semua email kosong → WS sembunyikan email).
+      const diag = {
+        courseId: courseEntry.courseId,
+        classCode: courseEntry.classCode,
+        enrolled: list.length,
+        withEmail: list.filter((u) => u.email).length,
+        withUsername: list.filter((u) => u.username).length,
+        sample: list.slice(0, 3).map((u) => ({ id: u.id, hasEmail: Boolean(u.email), username: u.username || null, idnumber: u.idnumber || null }))
+      };
+      return { user: found || null, courses: found ? buildMatchedCoursesFromUser(found, courseEntry) : [], diag };
     }
 
     let matchedUser = null;
@@ -419,11 +440,11 @@ const moodleService = {
     // Begitu user ditemukan, gunakan daftar enrolledcourses dari Moodle untuk membentuk daftar kelas.
     for (const group of chunkArray(classEntries, MOODLE_RESOLVE_CONCURRENCY)) {
       const results = await Promise.allSettled(group.map(checkCourse));
+      results.forEach((result) => {
+        if (result.status === 'fulfilled' && result.value?.diag) diagnostics.push(result.value.diag);
+        if (result.status === 'rejected') console.warn('[Moodle Service] Gagal cek enrolled user:', result.reason?.message || result.reason);
+      });
       const hit = results.find((result) => result.status === 'fulfilled' && result.value?.user)?.value;
-      results
-        .filter((result) => result.status === 'rejected')
-        .forEach((result) => console.warn('[Moodle Service] Gagal cek enrolled user:', result.reason?.message || result.reason));
-
       if (hit) {
         matchedUser = hit.user;
         matchedCourses = hit.courses || [];
@@ -431,15 +452,22 @@ const moodleService = {
       }
     }
 
+    console.log('[ResolveStudent] diag:', JSON.stringify({ email: targetEmail, requestedCourseId, requestedClassCode, found: Boolean(matchedUser), diagnostics }));
+
     if (!matchedUser) {
+      const allEmailsHidden = diagnostics.length > 0 && diagnostics.every((d) => d.enrolled > 0 && d.withEmail === 0);
       const result = {
         found: false,
         email: targetEmail,
         class_code: requestedClassCode || null,
         course_id: requestedCourseId || null,
-        message: requestedClassCode
-          ? `Email ini tidak ditemukan sebagai peserta kelas ${requestedClassCode}. Periksa email atau kelas yang dipilih.`
-          : 'Email ini tidak ditemukan pada daftar peserta course Moodle yang terdaftar di project ini.'
+        // Pesan lebih informatif bila ternyata WS Moodle menyembunyikan email semua peserta.
+        message: allEmailsHidden
+          ? 'Email peserta tidak diekspos oleh VClass (pengaturan privasi Moodle), jadi tak bisa dicocokkan via email. Minta admin mengizinkan email di "showuseridentity"/kapabilitas token, atau pakai username/idnumber.'
+          : (requestedClassCode || requestedCourseId)
+            ? `Email ini tidak ditemukan sebagai peserta kelas ${requestedClassCode || ('course ' + requestedCourseId)}. Periksa email atau kelas yang dipilih.`
+            : 'Email ini tidak ditemukan pada daftar peserta course Moodle yang terdaftar di project ini.',
+        debug: diagnostics
       };
       writeStudentResolveCache(cacheKey, result);
       return result;
