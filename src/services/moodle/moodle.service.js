@@ -17,6 +17,10 @@ function readStudentResolveCache(key) {
 
 function writeStudentResolveCache(key, value) {
   if (!key || !value) return;
+  // JANGAN cache hasil NEGATIF (found:false). Dulu negatif ke-cache 10 menit → setiap
+  // perbaikan logika/data Moodle tak terlihat (selalu balik "tidak ditemukan" dari cache),
+  // dan diagnosa jadi mustahil. Hanya hasil positif yang aman & layak di-cache.
+  if (value.found === false) return;
   studentResolveCache.set(key, { createdAt: Date.now(), value: JSON.parse(JSON.stringify(value)) });
 }
 
@@ -333,30 +337,25 @@ const moodleService = {
     const config = await moodleService.getConfig(projectId);
     const courseMap = config.course_map || {};
 
-    let classEntries = Object.entries(courseMap)
-      .map(([classCode, courseId]) => ({ classCode: normalizeClassCode(classCode), courseId: Number(courseId) }))
-      .filter((item) => item.classCode && item.courseId);
+    // SEMUA course yang termapping (label kelas pakai key course_map apa adanya bila tak
+    // bisa dinormalisasi, mis. "9A").
+    const allEntries = Object.entries(courseMap)
+      .map(([classCode, courseId]) => ({ classCode: normalizeClassCode(classCode) || String(classCode).toUpperCase(), courseId: Number(courseId) }))
+      .filter((item) => item.courseId);
 
-    if (requestedCourseId) {
-      const classFromMap = Object.entries(courseMap).find(([, id]) => String(id) === String(requestedCourseId))?.[0] || requestedClassCode;
-      classEntries = [{ classCode: normalizeClassCode(classFromMap) || requestedClassCode || `COURSE-${requestedCourseId}`, courseId: requestedCourseId }];
-    } else if (requestedClassCode) {
-      const mappedCourseId = Number(courseMap[requestedClassCode] || 0);
-      if (!mappedCourseId) {
-        const result = {
-          found: false,
-          email: targetEmail,
-          class_code: requestedClassCode,
-          message: `Kelas ${requestedClassCode} belum ada di mapping Moodle. Sinkronisasi course dari dashboard terlebih dahulu.`
-        };
-        writeStudentResolveCache(cacheKey, result);
-        return result;
-      }
-      classEntries = [{ classCode: requestedClassCode, courseId: mappedCourseId }];
+    if (!allEntries.length) {
+      throw new Error('course_map Moodle masih kosong. Klik Sinkronisasi Course dari dashboard terlebih dahulu.');
     }
 
-    if (!classEntries.length) {
-      throw new Error('course_map Moodle masih kosong. Klik Sinkronisasi Course dari dashboard terlebih dahulu.');
+    // Course yang DIPILIH user (dari course_id otoritatif, atau dari kode kelas). Dicek DULU
+    // (cepat). Kalau email tak ketemu di situ, fallback cek course lain — supaya email yang
+    // salah-pilih kelas tetap ditemukan & kelas aslinya terdeteksi otomatis.
+    let pickedEntry = null;
+    if (requestedCourseId) {
+      pickedEntry = allEntries.find((e) => e.courseId === requestedCourseId)
+        || { classCode: requestedClassCode || `COURSE-${requestedCourseId}`, courseId: requestedCourseId };
+    } else if (requestedClassCode) {
+      pickedEntry = allEntries.find((e) => e.classCode === requestedClassCode) || null;
     }
 
     function buildMatchedCoursesFromUser(found, fallbackEntry) {
@@ -392,12 +391,14 @@ const moodleService = {
         });
       }
 
-      return requestedClassCode || requestedCourseId
-        ? result.filter((course) => {
-            if (requestedCourseId) return String(course.course_id) === String(requestedCourseId);
-            return normalizeClassCode(course.class_code) === requestedClassCode;
-          })
-        : result;
+      // JANGAN buang course lain — kembalikan semua course siswa yang termapping, tapi
+      // prioritaskan course yang dipilih sebagai primary (kalau siswa memang enrolled di situ).
+      if (requestedCourseId) {
+        result.sort((a, b) =>
+          (String(b.course_id) === String(requestedCourseId) ? 1 : 0) -
+          (String(a.course_id) === String(requestedCourseId) ? 1 : 0));
+      }
+      return result;
     }
 
     // Email kadang DISEMBUNYIKAN oleh web service Moodle (privasi/showuseridentity), jadi
@@ -436,20 +437,33 @@ const moodleService = {
     let matchedUser = null;
     let matchedCourses = [];
 
-    // Cek beberapa course secara paralel per batch supaya tidak menunggu 8 kelas satu per satu.
-    // Begitu user ditemukan, gunakan daftar enrolledcourses dari Moodle untuk membentuk daftar kelas.
-    for (const group of chunkArray(classEntries, MOODLE_RESOLVE_CONCURRENCY)) {
-      const results = await Promise.allSettled(group.map(checkCourse));
-      results.forEach((result) => {
-        if (result.status === 'fulfilled' && result.value?.diag) diagnostics.push(result.value.diag);
-        if (result.status === 'rejected') console.warn('[Moodle Service] Gagal cek enrolled user:', result.reason?.message || result.reason);
-      });
-      const hit = results.find((result) => result.status === 'fulfilled' && result.value?.user)?.value;
-      if (hit) {
-        matchedUser = hit.user;
-        matchedCourses = hit.courses || [];
-        break;
+    // Cek course (paralel per batch) sampai user ketemu.
+    async function searchEntries(entries) {
+      for (const group of chunkArray(entries, MOODLE_RESOLVE_CONCURRENCY)) {
+        const results = await Promise.allSettled(group.map(checkCourse));
+        results.forEach((result) => {
+          if (result.status === 'fulfilled' && result.value?.diag) diagnostics.push(result.value.diag);
+          else if (result.status === 'rejected') {
+            diagnostics.push({ error: String(result.reason?.message || result.reason) });
+            console.warn('[Moodle Service] Gagal cek enrolled user:', result.reason?.message || result.reason);
+          }
+        });
+        const hit = results.find((result) => result.status === 'fulfilled' && result.value?.user)?.value;
+        if (hit) return hit;
       }
+      return null;
+    }
+
+    // 1) Cek course PILIHAN dulu (cepat — biasanya cukup 1 panggilan WS).
+    let hit = pickedEntry ? await searchEntries([pickedEntry]) : null;
+    // 2) Fallback: kalau belum ketemu, cek course lain (email salah-pilih kelas tetap ketemu).
+    if (!hit) {
+      const restEntries = allEntries.filter((e) => !pickedEntry || e.courseId !== pickedEntry.courseId);
+      if (restEntries.length) hit = await searchEntries(restEntries);
+    }
+    if (hit) {
+      matchedUser = hit.user;
+      matchedCourses = hit.courses || [];
     }
 
     console.log('[ResolveStudent] diag:', JSON.stringify({ email: targetEmail, requestedCourseId, requestedClassCode, found: Boolean(matchedUser), diagnostics }));
