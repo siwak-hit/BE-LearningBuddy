@@ -1309,6 +1309,51 @@ Tugasmu menjawab pertanyaan siswa tentang materi "${label}". Ikuti aturan ini de
 Pertanyaan siswa: ${cleanQ}${body}`;
 }
 
+// [v0.9.42] Kuis interaktif @materi: jumlah soal (maks 10) diambil dari pesan; null = belum
+// ditentukan (perlu konfirmasi). Pakai cleanQ (token @materi-N sudah dibuang) supaya angka
+// pada "materi-1" tidak ikut terbaca.
+function parseQuizCount(cleanQ = '') {
+  const m = String(cleanQ || '').match(/\b(\d{1,2})\b/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n ? Math.min(10, Math.max(1, n)) : null;
+}
+
+// Parse JSON kuis dari output AI (toleran terhadap fence ```json dan teks pembungkus).
+// Kembalikan array soal tervalidasi atau null.
+function parseQuizJSON(text = '', count = 10) {
+  let s = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/,'').trim();
+  const a = s.indexOf('{'), b = s.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+  let obj;
+  try { obj = JSON.parse(s.slice(a, b + 1)); } catch (_) { return null; }
+  const arr = Array.isArray(obj?.questions) ? obj.questions : [];
+  const out = [];
+  for (const q of arr) {
+    const options = Array.isArray(q.options) ? q.options.map((o) => String(o).trim()).filter(Boolean) : [];
+    const answer = Number(q.answer);
+    if (!q.q || options.length < 2 || !Number.isInteger(answer) || answer < 0 || answer >= options.length) continue;
+    out.push({ q: String(q.q).trim(), options, answer, explanation: q.explanation ? String(q.explanation).trim() : '' });
+    if (out.length >= count) break;
+  }
+  return out.length ? out : null;
+}
+
+async function generateQuizJSON(count, label, materiContent, sessionId, responseMode) {
+  const prompt = `Kamu guru SMP. Buat TEPAT ${count} soal PILIHAN GANDA (4 opsi) untuk siswa SMP, HANYA dari isi materi di bawah (jangan mengarang di luar materi). Bahasa Indonesia.
+Output HANYA JSON valid, tanpa teks/markdown lain:
+{"questions":[{"q":"pertanyaan","options":["opsi A","opsi B","opsi C","opsi D"],"answer":0,"explanation":"pembahasan singkat 1 kalimat"}]}
+"answer" = indeks opsi yang BENAR (0-3).
+
+=== MATERI "${label}" ===
+${materiContent}`;
+  try {
+    const r = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: 'penjelasan_materi', responseMode });
+    if (!r.ok) { if (r.quotaFallback) aiRateLimitService.markGlobalExhausted(); return null; }
+    return parseQuizJSON(r.text, count);
+  } catch (e) { console.error('[Quiz] generate gagal:', e.message); return null; }
+}
+
 function isCacheableAIRequest({ detectedIntent, forceAI, forceFAQ, forceSystem }) {
   if (forceFAQ || forceSystem) return false;
 
@@ -2743,6 +2788,33 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       const hasRealQuestion = String(cleanQ || '').replace(/\s+/g, '').length >= 4;
       const wantsAiKind = Boolean(mentionTask) || forceAI || hasRealQuestion;
 
+      // ====== [v0.9.42] KUIS INTERAKTIF ======
+      // Minta jumlah dulu (maks 10) → generate JSON terstruktur → FE render kartu "Mulai
+      // Latihan" + modal interaktif. Quiz TIDAK disimpan ke DB (action quiz tak dipersist).
+      if (mentionTask === 'quiz' && materiContent) {
+        const count = parseQuizCount(cleanQ);
+        if (!count) {
+          const actions = [3, 5, 10].map((n) => ({ type: 'quiz_setup', label: `${n} soal`, token: mention.token, count: n }));
+          const text = `Mau berapa soal latihan dari **${label}**? (maksimal 10) Pilih di bawah ya 👇`;
+          await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'penjelasan_materi', context_used: { response_source: 'system', actions, used_model: 'quiz_setup' } });
+          return { intent: 'penjelasan_materi', response_source: 'system', ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions } };
+        }
+        const aiUp = !(aiUsage.cooldown_active || aiUsage.limit_reached || aiUsage.canUseAI === false);
+        if (aiUp) {
+          const questions = await generateQuizJSON(count, label, materiContent, sessionId, responseMode);
+          if (questions && questions.length) {
+            aiUsage = aiRateLimitService.consume(sessionId);
+            const startAction = { type: 'start_quiz', label: 'Mulai Latihan', quiz: { title: label, token: mention.token, count: questions.length, questions } };
+            const text = `Latihan kuis dari **${label}** sudah siap 📘 (${questions.length} soal).`;
+            // ponytail: simpan PESAN tanpa action quiz (kuis ephemeral, tak masuk DB) — kartu
+            // hidup hanya di sesi ini; reload = hilang (sesuai permintaan).
+            await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'penjelasan_materi', context_used: { response_source: 'ai', actions: [], used_model: 'quiz_ai' } });
+            return { intent: 'penjelasan_materi', response_source: 'ai', ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions: [startAction] } };
+          }
+        }
+        // gagal generate / kuota habis → lanjut ke alur teks lama (fallback di bawah).
+      }
+
       // ====== JALUR AI dengan CACHE-FIRST (rangkum/poin/jelaskan/soal/tanya) ======
       // Cache dulu: kalau sudah pernah dijawab → kembalikan tanpa kuota AI (berlaku walau habis).
       // Kalau belum → hit AI lalu SIMPAN ke cache.
@@ -3245,4 +3317,6 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
   }
 };
 
+chatService._parseQuizJSON = parseQuizJSON; // ponytail: diekspos untuk self-check parser
+chatService._parseQuizCount = parseQuizCount;
 module.exports = chatService;

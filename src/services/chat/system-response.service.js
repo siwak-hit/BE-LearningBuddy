@@ -629,7 +629,7 @@ const systemResponseService = {
               ? (lmsContext.progress_available
                 ? `Semua aktivitas yang terbaca pada course ${lmsContext.course?.course_name || 'ini'} sudah selesai. Jika di VClass masih terkunci, biasanya syarat penyelesaian materi/forum sebelumnya belum terpenuhi atau completion belum sinkron.`
                 : `Aktivitas course terbaca, tetapi status completion siswa belum tersedia dari Moodle. Silakan cek urutan aktivitas di VClass.`)
-              : `Sistem belum menemukan aktivitas pada course ${lmsContext.course?.course_name || 'ini'}. Coba sinkronisasi course di dashboard jika data baru ditambahkan guru.`;
+              : `Untuk sekarang belum ada aktivitas yang bisa kamu akses di kelas ${lmsContext.course?.course_name || 'ini'}. Mungkin gurumu belum membukanya (pengaturan di VClass), atau memang sedang tidak ada. Santai, coba cek lagi nanti ya 🙂`;
             text = emptyStateHtml({ title: hasAnyActivityInCourse ? 'Tidak ada tugas belum selesai' : 'Tugas tidak ditemukan', subtitle, actionUrl: courseUrl });
           } else {
             const typeName = intent.includes('quiz') ? 'kuis' : intent.includes('forum') ? 'forum' : 'tugas';
@@ -643,8 +643,8 @@ const systemResponseService = {
             const subtitle = hasAnyActivityInCourse
               ? (hasTargetActivity
                 ? `Semua ${typeName} yang terbaca pada course ${lmsContext.course?.course_name || 'ini'} sudah selesai.`
-                : `Sistem belum menemukan ${typeName} pada course ${lmsContext.course?.course_name || 'ini'}. Coba jalankan sinkronisasi course atau cek kembali data dari Moodle API.`)
-              : `Sistem belum menemukan aktivitas pada course ${lmsContext.course?.course_name || 'ini'}. Coba sinkronisasi course di dashboard jika data baru ditambahkan guru.`;
+                : `Untuk sekarang belum ada ${typeName} yang bisa kamu akses di kelas ${lmsContext.course?.course_name || 'ini'}. Mungkin belum dibuka gurumu (pengaturan di VClass) atau memang belum ada. Coba cek lagi nanti ya 🙂`)
+              : `Untuk sekarang belum ada aktivitas yang bisa kamu akses di kelas ${lmsContext.course?.course_name || 'ini'}. Mungkin gurumu belum membukanya (pengaturan di VClass), atau memang sedang tidak ada. Santai, coba cek lagi nanti ya 🙂`;
             text = emptyStateHtml({ title: hasTargetActivity ? `${typeTitle} sudah selesai` : `${typeTitle} tidak ditemukan`, subtitle, actionUrl: courseUrl });
           }
         }

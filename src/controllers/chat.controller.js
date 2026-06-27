@@ -12,6 +12,7 @@ const documentModel = require('../models/document.model');
 const moodleService = require('../services/moodle/moodle.service');
 const lmsRouteModel = require('../models/lmsRoute.model');
 const moodleConfigModel = require('../models/moodleConfig.model');
+const moodleStudentModel = require('../models/moodleStudent.model');
 const difficultyService = require('../services/ai/difficulty.service');
 const recommendationService = require('../services/ai/recommendation.service');
 
@@ -344,8 +345,43 @@ const chatController = {
 
     const meta = session.page_context?.session_meta || {};
     const userId = meta.moodle_user_id;
-    if (!userId) return response.success(res, 'User Moodle belum terdeteksi', [], 200);
+    const email = meta.email || '';
+    const currentCourseId = String(meta.course_id || '');
 
+    // [v0.9.41] UTAMAKAN INDEKS LOKAL (moodle_students) berdasarkan EMAIL siswa — ini course
+    // yang BENAR-BENAR di-enroll siswa. Dulu pakai getUserCourses(moodle_user_id) yang sering
+    // salah karena userId dari DOM keliru → daftar course salah (mis. 8A padahal 8D).
+    try {
+      const dirRows = await moodleStudentModel.findRowsForStudent(session.project_id, { email, userId });
+      if (dirRows && dirRows.length) {
+        let routesById = new Map();
+        try {
+          const routes = await lmsRouteModel.getCoursesByProject(session.project_id);
+          routesById = new Map((routes || []).map((r) => [String(r.course_id), r]));
+        } catch (_) {}
+
+        const seen = new Set();
+        const list = [];
+        dirRows.forEach((r) => {
+          const cid = String(r.course_id);
+          if (seen.has(cid)) return;
+          seen.add(cid);
+          const route = routesById.get(cid);
+          list.push({
+            id: r.course_id,
+            fullname: route?.course_title || (r.class_code ? `Informatika ${r.class_code}` : `Course ${r.course_id}`),
+            shortname: r.class_code ? `TIK ${r.class_code}` : '',
+            is_current: cid === currentCourseId
+          });
+        });
+        return response.success(res, 'Daftar course siswa (indeks)', list, 200);
+      }
+    } catch (e) {
+      console.warn('[StudentCourses] indeks lokal gagal, fallback live:', e.message);
+    }
+
+    // Fallback: indeks kosong/belum ada → pakai Moodle live (perilaku lama).
+    if (!userId) return response.success(res, 'User Moodle belum terdeteksi', [], 200);
     let courses = [];
     try {
       courses = await moodleService.getUserCourses(session.project_id, userId);
@@ -354,7 +390,6 @@ const chatController = {
       return response.success(res, 'Gagal memuat course dari Moodle', [], 200);
     }
 
-    const currentCourseId = String(meta.course_id || '');
     const list = (Array.isArray(courses) ? courses : [])
       .map((c) => ({
         id: c.id,

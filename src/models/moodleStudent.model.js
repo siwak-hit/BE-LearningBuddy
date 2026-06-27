@@ -55,6 +55,28 @@ const moodleStudentModel = {
       .from(TABLE).select('*').eq('project_id', projectId).or(orParts.join(','));
     if (error) throw error;
     return Array.isArray(data) ? data : [];
+  },
+
+  async findByUserId(projectId, userId) {
+    if (!projectId || userId == null || userId === '') return [];
+    const { data, error } = await supabaseAdmin
+      .from(TABLE).select('*').eq('project_id', projectId).eq('moodle_user_id', userId);
+    if (error) throw error;
+    return Array.isArray(data) ? data : [];
+  },
+
+  // SEMUA course milik satu siswa. Identifikasi via email/username/idnumber, lalu EXPAND via
+  // moodle_user_id — karena email kadang cuma terisi di sebagian baris course (privasi Moodle
+  // tak konsisten per-course), siswa bisa salah terdeteksi hanya enroll di 1 kelas.
+  async findRowsForStudent(projectId, { email = '', userId = null } = {}) {
+    if (!projectId) return [];
+    let seed = [];
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (cleanEmail) seed = await this.findByIdentifier(projectId, cleanEmail);
+    if (!seed.length && userId != null && userId !== '') seed = await this.findByUserId(projectId, userId);
+    if (!seed.length) return [];
+    const uid = (seed.find((r) => r.email === cleanEmail) || seed[0]).moodle_user_id;
+    return this.findByUserId(projectId, uid);
   }
 };
 

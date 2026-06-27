@@ -380,7 +380,9 @@ const moodleService = {
     // [v0.9.40] INDEKS LOKAL dulu (cepat). Hindari menarik ~200 peserta × 9 course dari
     // Moodle live tiap verifikasi (penyebab request lama/timeout). Indeks diisi saat sync.
     try {
-      const dirRows = await moodleStudentModel.findByIdentifier(projectId, targetEmail);
+      // findRowsForStudent expand via moodle_user_id → SEMUA kelas siswa ikut (bukan cuma
+      // baris yang emailnya kebetulan terisi).
+      const dirRows = await moodleStudentModel.findRowsForStudent(projectId, { email: targetEmail });
       if (dirRows && dirRows.length) {
         const result = buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, config);
         writeStudentResolveCache(cacheKey, result);
