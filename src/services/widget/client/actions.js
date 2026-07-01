@@ -44,13 +44,9 @@ function bindChatBoxEvents(box) {
         var name = nameInput ? nameInput.value.trim() : '';
         var key = unlockInput.value.trim();
 
-        if (!name) {
-          showToast('Harap masukkan nama panggilanmu!', true);
-          if(nameInput) nameInput.style.borderColor = '#ef4444';
-          return;
-        }
+        // [FIX] Cukup key yang wajib. Nama opsional (identitas siswa sering sudah ada).
         if (!key) {
-          showToast('Harap masukkan key dari guru!', true);
+          showToast('Masukkan key dari guru dulu ya.', true);
           return;
         }
 
@@ -59,19 +55,22 @@ function bindChatBoxEvents(box) {
 
         var frontendBaseUrl = typeof ALB_FRONTEND_URL !== 'undefined' ? ALB_FRONTEND_URL : 'http://localhost:4321';
 
-        // 1. Simpan Nama Siswa Terlebih Dahulu
-        fetch(frontendBaseUrl + '/api/chat/session/' + (window.CURRENT_SESSION_ID || localStorage.getItem('alb_session_id')) + '/profile', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ student_name: name })
-        }).then(function() {
-            // 2. Jika sukses simpan nama, barulah kirim request Unlock Key
+        // 1. Simpan Nama Siswa dulu (hanya bila diisi), lalu kirim request Unlock Key.
+        var saveName = name
+          ? fetch(frontendBaseUrl + '/api/chat/session/' + (window.CURRENT_SESSION_ID || localStorage.getItem('alb_session_id')) + '/profile', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ student_name: name })
+            })
+          : Promise.resolve();
+
+        saveName.then(function() {
             return unlockChat(key);
         }).then(function (res) {
             if (res.status === 'success') {
               handleLockdownState(false);
               showToast('Chat berhasil dibuka kembali.');
-              appendDisclaimer('Akses dibuka. Gunakan AI ini untuk belajar dengan sopan ya, ' + name + '!');
+              appendDisclaimer('Akses dibuka. Gunakan AI ini untuk belajar dengan sopan ya' + (name ? ', ' + name : '') + '!');
               triggerWelcomeText();
             } else {
               showToast(res.message || 'Key salah atau kedaluwarsa!', true);

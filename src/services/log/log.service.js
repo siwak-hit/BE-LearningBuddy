@@ -90,7 +90,8 @@ const LogService = {
         last_message: lastMsg ? lastMsg.message : '-',
         dominant_intent: intentDominan,
         alert_count: sessionMods.length,
-        alert_types: [...new Set(sessionMods.map(m => m.type))]
+        alert_types: [...new Set(sessionMods.map(m => m.type))],
+        is_locked: session.is_locked === true // [FIX] sesi terkunci → FE beri border merah + badge
       };
     });
 
