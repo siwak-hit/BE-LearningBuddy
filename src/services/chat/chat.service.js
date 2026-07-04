@@ -2212,10 +2212,17 @@ const chatService = {
       ? lmsContextService.getClassCodeFromSession(session)
       : getClassCodeFromSession(session);
 
+    // [FIX] Nama sapaan utamakan identitas TERSIMPAN di sesi (terverifikasi) daripada
+    // display_name dari pageContext request — pageContext bisa stale/berisi nama akun VClass
+    // (mis. "Siswa Dummy 1") padahal sesi sudah terverifikasi sebagai siswa lain (Kanaya).
+    // Placeholder "Pengunjung #XXX" tetap boleh ditimpa nama dari request (kasus anonim→verifikasi).
+    const storedStudentName = String(sessionMeta.display_name || session.student_alias || '').trim();
+    const isPlaceholderName = /^pengunjung\s*#/i.test(storedStudentName);
     const studentName =
+      (storedStudentName && !isPlaceholderName ? storedStudentName : '') ||
       pageContext?.session_meta?.display_name ||
-      sessionMeta.display_name ||
-      session.student_alias;
+      storedStudentName ||
+      'teman';
 
     // Ekstraksi Course ID dari session/context/source_url.
     // Ini penting supaya chat tetap bisa membaca Moodle API meskipun class_code lama masih "Umum".
