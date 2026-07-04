@@ -604,13 +604,24 @@ const moodleContentSyncService = {
       });
     }
 
+    const withEmail = rows.filter((r) => r.email).length;
+
+    // [FIX v0.9.44] JANGAN replace-all kalau ada course yang GAGAL diambil. replaceForProject =
+    // delete-all + insert; kalau sebagian course gagal (mis. course besar/timeout), indeks kelas
+    // itu terhapus diam-diam → siswa jadi tak terdeteksi enroll di kelas tsb (bug 9A hilang dari
+    // indeks). Lebih aman: pertahankan indeks lama, lapor gagal, minta admin ulangi.
+    const failedCourses = entries.length - coursesOk;
+    if (failedCourses > 0) {
+      console.warn(`[StudentDir] ${failedCourses}/${entries.length} course GAGAL diambil — indeks lama DIPERTAHANKAN (tidak di-replace) agar kelas yang gagal tak hilang. Ulangi Sinkron Indeks Siswa.`);
+      return { courses: entries.length, coursesOk, students: rows.length, withEmail, partial: true, failed_courses: failedCourses, replaced: false };
+    }
+
     let stored = 0;
     try { stored = await moodleStudentModel.replaceForProject(projectId, rows); }
     catch (err) { console.warn('[StudentDir] simpan direktori gagal:', err.message); }
 
-    const withEmail = rows.filter((r) => r.email).length;
     console.log('[StudentDir] built:', JSON.stringify({ projectId, courses: entries.length, coursesOk, students: rows.length, withEmail }));
-    return { courses: entries.length, coursesOk, students: stored, withEmail };
+    return { courses: entries.length, coursesOk, students: stored, withEmail, partial: false, replaced: true };
   },
 
   async syncAllCourses(projectId, options = {}) {

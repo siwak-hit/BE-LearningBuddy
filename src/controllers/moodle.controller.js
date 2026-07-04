@@ -351,6 +351,16 @@ const moodleController = {
       if (!projectId) return response.error(res, 'Missing projectId', null, 400);
 
       const result = await moodleContentSyncService.syncStudentDirectory(projectId);
+      // [FIX v0.9.44] Sebagian course gagal → JANGAN klaim sukses (indeks lama dipertahankan,
+      // tak di-replace). Kalau tetap 200 "berhasil", admin tak tahu kelas ada yang belum masuk.
+      if (result.partial) {
+        return response.error(
+          res,
+          `${result.failed_courses} dari ${result.courses} course gagal diambil dari Moodle. Indeks lama dipertahankan agar data kelas tidak hilang. Coba Sinkron Indeks Siswa lagi.`,
+          result,
+          503
+        );
+      }
       return response.success(res, 'Indeks siswa diperbarui', result);
     } catch (error) {
       return response.error(res, 'Gagal membangun indeks siswa', error.message, 500);
