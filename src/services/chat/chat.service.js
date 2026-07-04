@@ -181,16 +181,18 @@ function detectAcronymExpansionQuestion(message = '') {
   const raw = String(message || '');
   const normalized = normalizeText(raw);
 
-  // Menangkap: "kepanjangan cms", "cms itu apa", "cms adalah singkatan dari"
-  const explicit = normalized.match(/\b(?:kepanjangan|singkatan|arti singkatan|apa yang dimaksud dengan|apakah yang dimaksud dengan|apa itu)\s+([a-z]{2,8})\b/i)
-    || normalized.match(/\b([a-z]{2,8})\s+(?:itu\s+apa|adalah\s+singkatan|kepanjangannya)\b/i);
+  // [FIX] HANYA anggap "minta buka kepanjangan singkatan" kalau intent-nya EKSPLISIT
+  // (kepanjangan/singkatan/akronim) ATAU ini soal pilihan ganda (anti-suapin jawaban).
+  // "apa itu CSS" / "apa yang dimaksud dengan X" = pertanyaan DEFINISI biasa → JANGAN dibajak
+  // ke mode "tebak hurufnya sendiri"; biarkan dijawab normal dari materi/AI.
+  const explicit = normalized.match(/\b(?:kepanjangan|singkatan|arti singkatan|akronim)\s+(?:dari\s+)?([a-z]{2,8})\b/i)
+    || normalized.match(/\b([a-z]{2,8})\s+(?:adalah\s+singkatan|kepanjangannya|singkatan\s+dari)\b/i);
 
   const uppercase = raw.match(/\b([A-Z]{2,8})\b/);
   const term = (explicit?.[1] || uppercase?.[1] || '').toUpperCase();
   if (!term) return { isAcronym: false, term: '' };
 
-  const asksAcronym = /\b(kepanjangan|singkatan|akronim|apa yang dimaksud dengan|apakah yang dimaksud dengan|apa itu)\b/i.test(raw)
-    || /\b(itu apa)\b/i.test(raw)
+  const asksAcronym = /\b(kepanjangan|singkatan|akronim)\b/i.test(raw)
     || looksLikeMultipleChoiceQuestion(raw);
 
   return { isAcronym: asksAcronym && /^[A-Z0-9]{2,8}$/.test(term), term };
