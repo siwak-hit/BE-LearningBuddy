@@ -225,12 +225,22 @@ const chatController = {
       }
     }
 
+    // [FIX] Kolom course_context NOT NULL. Kalau request tak kirim courseContext (mis. jalur
+    // switchSessionForIdentity yang cuma kirim moodleContext), JANGAN insert null → susun dari
+    // data yang sudah di-resolve (course_id/kelas/judul) supaya sesi baru bawa course yang benar.
+    const finalCourseContext = courseContext || {
+      course_id: sessionMeta.course_id || null,
+      class_code: sessionMeta.class_code || null,
+      course_title: sessionMeta.course_title || null,
+      enrolled_courses: sessionMeta.enrolled_courses || []
+    };
+
     const sessionData = {
       project_id: projectId,
       session_key: sessionKey,
       source_url: sourceUrl || null,
       page_context: finalPageContext,
-      course_context: courseContext || null,
+      course_context: finalCourseContext,
       student_alias: displayName
     };
 
