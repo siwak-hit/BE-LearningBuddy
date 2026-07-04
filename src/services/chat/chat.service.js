@@ -1340,18 +1340,29 @@ function parseQuizJSON(text = '', count = 10) {
 }
 
 async function generateQuizJSON(count, label, materiContent, sessionId, responseMode) {
-  const prompt = `Kamu guru SMP. Buat TEPAT ${count} soal PILIHAN GANDA (4 opsi) untuk siswa SMP, HANYA dari isi materi di bawah (jangan mengarang di luar materi). Bahasa Indonesia.
+  const basePrompt = `Kamu guru SMP. Buat TEPAT ${count} soal PILIHAN GANDA (4 opsi) untuk siswa SMP, HANYA dari isi materi di bawah (jangan mengarang di luar materi). Bahasa Indonesia.
 Output HANYA JSON valid, tanpa teks/markdown lain:
 {"questions":[{"q":"pertanyaan","options":["opsi A","opsi B","opsi C","opsi D"],"answer":0,"explanation":"pembahasan singkat 1 kalimat"}]}
 "answer" = indeks opsi yang BENAR (0-3).
 
 === MATERI "${label}" ===
 ${materiContent}`;
-  try {
-    const r = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: 'penjelasan_materi', responseMode });
-    if (!r.ok) { if (r.quotaFallback) aiRateLimitService.markGlobalExhausted(); return null; }
-    return parseQuizJSON(r.text, count);
-  } catch (e) { console.error('[Quiz] generate gagal:', e.message); return null; }
+
+  // [FIX] Gemini KADANG mengabaikan "HANYA JSON" dan membalas prosa (sapaan + soal teks) →
+  // parseQuizJSON null → dulu jatuh ke kuis teks (bukan modal interaktif). Coba lagi 1x dengan
+  // instruksi lebih tegas sebelum menyerah.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const prompt = attempt === 0
+      ? basePrompt
+      : `${basePrompt}\n\nPENTING: Balas HANYA objek JSON mentah. DILARANG ada sapaan, kalimat pembuka/penutup, atau markdown. Mulai langsung dengan karakter { dan akhiri dengan }.`;
+    try {
+      const r = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: 'penjelasan_materi', responseMode });
+      if (!r.ok) { if (r.quotaFallback) aiRateLimitService.markGlobalExhausted(); return null; }
+      const parsed = parseQuizJSON(r.text, count);
+      if (parsed && parsed.length) return parsed;
+    } catch (e) { console.error('[Quiz] generate gagal (attempt ' + attempt + '):', e.message); }
+  }
+  return null;
 }
 
 function isCacheableAIRequest({ detectedIntent, forceAI, forceFAQ, forceSystem }) {
