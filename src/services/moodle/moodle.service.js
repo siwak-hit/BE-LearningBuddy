@@ -33,7 +33,7 @@ function chunkArray(items = [], size = 3) {
 
 // [v0.9.40] Bentuk hasil resolve dari baris INDEKS LOKAL (moodle_students). Satu siswa bisa
 // punya beberapa baris (beberapa course). Prioritaskan course yang dipilih sebagai primary.
-function buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, config) {
+function buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, requestedClassCode, config) {
   // Kalau pencocokan kena beberapa user (mis. username = local-part orang lain), utamakan
   // yang email-nya persis sama; lalu ambil semua baris milik user itu.
   const exact = dirRows.filter((r) => r.email && r.email === targetEmail);
@@ -50,9 +50,16 @@ function buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, confi
     roles: ['student']
   }));
 
+  // [FIX] Utamakan course yang DIPILIH siswa. Dulu cuma pakai requestedCourseId → kalau FE
+  // cuma kirim classCode (tanpa courseId), primary jatuh ke enrolled[0] (kelas urutan pertama,
+  // mis. 8E) walau siswa pilih 9A. Kini cocokkan via courseId ATAU classCode.
   let primary = enrolled[0];
   if (requestedCourseId) {
     const p = enrolled.find((c) => Number(c.course_id) === Number(requestedCourseId));
+    if (p) primary = p;
+  } else if (requestedClassCode) {
+    const wanted = String(requestedClassCode).trim().toUpperCase();
+    const p = enrolled.find((c) => String(c.class_code || '').trim().toUpperCase() === wanted);
     if (p) primary = p;
   }
 
@@ -384,7 +391,7 @@ const moodleService = {
       // baris yang emailnya kebetulan terisi).
       const dirRows = await moodleStudentModel.findRowsForStudent(projectId, { email: targetEmail });
       if (dirRows && dirRows.length) {
-        const result = buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, config);
+        const result = buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, requestedClassCode, config);
         writeStudentResolveCache(cacheKey, result);
         return result;
       }
