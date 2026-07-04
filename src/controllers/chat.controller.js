@@ -209,7 +209,13 @@ const chatController = {
         const existing = await studentSessionRegistryModel.findActive(projectId, studentEmail, studentClass);
         if (existing?.session_id && isSameJakartaDay(existing.updated_at)) {
           const reused = await chatModel.getSessionById(existing.session_id);
-          if (reused) {
+          // [FIX] Verifikasi COURSE sesi yang mau di-reuse benar-benar cocok dgn yang diminta.
+          // Registry bisa "korup" (kelas 9A menunjuk ke sesi yang meta-nya 8E) → dulu reuse
+          // membuka sesi 8E untuk permintaan 9A. Kalau course tak cocok, JANGAN reuse → buat baru.
+          const wantCourse = String(sessionMeta.course_id || '');
+          const reusedCourse = String(reused?.page_context?.session_meta?.course_id || '');
+          const courseMatches = wantCourse ? reusedCourse === wantCourse : true;
+          if (reused && courseMatches) {
             // Segarkan registry agar tetap aktif.
             await studentSessionRegistryModel.upsert({
               project_id: projectId, session_id: reused.id,

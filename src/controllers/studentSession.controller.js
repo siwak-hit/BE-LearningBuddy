@@ -27,7 +27,19 @@ const studentSessionController = {
       if (!projectId) return response.error(res, 'projectId/projectKey diperlukan', null, 400);
       if (!email || !(classCode || class_code)) return response.error(res, 'email dan classCode diperlukan', null, 400);
       const data = await studentSessionRegistryModel.findActive(projectId, email, classCode || class_code);
-      const valid = data && isSameJakartaDay(data.updated_at);
+      let valid = data && isSameJakartaDay(data.updated_at);
+
+      // [FIX] Verifikasi sesi yang ditunjuk registry BENAR kelas yang diminta. Registry bisa
+      // korup (kelas 9A menunjuk ke sesi yang meta-nya 8E) → dulu reuse membuka kelas yang salah.
+      if (valid) {
+        try {
+          const sess = await chatModel.getSessionById(data.session_id);
+          const actualClass = String(sess?.page_context?.session_meta?.class_code || '').toUpperCase();
+          const wantClass = String(classCode || class_code || '').toUpperCase();
+          if (!sess || (actualClass && wantClass && actualClass !== wantClass)) valid = false;
+        } catch (_) { /* biarkan valid apa adanya kalau gagal cek */ }
+      }
+
       return response.success(res, valid ? 'Session lama ditemukan' : 'Session lama tidak ditemukan', { found: Boolean(valid), session: valid ? data : null });
     } catch (error) {
       return response.error(res, 'Gagal mencari session siswa', error.message, 500);
