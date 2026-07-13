@@ -191,10 +191,15 @@ const externalLoaderService = {
   function renderButton(config) {
     createStyle(config);
 
+    var btnTheme = config.theme || {};
+    if (typeof btnTheme === 'string') { try { btnTheme = JSON.parse(btnTheme); } catch (e) { btnTheme = {}; } }
+    var launcherText = (btnTheme.title && String(btnTheme.title).trim()) ? String(btnTheme.title).trim() : 'Tanya AI';
+    var safeLauncherText = launcherText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
     var btn = document.createElement('button');
     btn.id = 'alb-external-launcher';
     btn.className = 'alb-ext-launcher-btn';
-    btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
+    btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> ' + safeLauncherText;
 
     function checkMoodleLoginStatus() {
       if (document.body.classList.contains('notloggedin')) return false;
