@@ -26,6 +26,7 @@ router.use('/knowledge', knowledgeRoutes);
 router.use('/documents', documentRoutes);
 router.use('/rag', ragRoutes);
 router.post('/auth/login', authLimiter, authController.login);
+router.post('/auth/register', authLimiter, authController.register);
 router.use('/logs', logRoutes);
 router.use('/page-templates', templateRoutes);
 router.use('/moodle', moodleRoutes);

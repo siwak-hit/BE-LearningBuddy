@@ -319,6 +319,22 @@ const chatController = {
       console.warn('[Difficulty] gagal analisa:', e.message);
     }
 
+    // [v0.9.52] Mode darurat: bila koneksi Moodle bermasalah (token kadaluarsa / endpoint
+    // mati), tandai respons agar FE menampilkan catatan bahwa jawaban berasal dari PANDUAN
+    // penggunaan Moodle — bukan materi/forum terbaru. Non-blocking & di-cache (~5 menit).
+    try {
+      const health = await moodleService.isMoodleDegraded(session.project_id);
+      if (health.degraded) {
+        result.degraded = true;
+        result.degraded_reason = health.reason;
+        result.degraded_note = health.reason === 'token'
+          ? 'Koneksi ke Moodle sedang bermasalah (akses kedaluwarsa). Jawaban ini dari panduan penggunaan Moodle, bukan materi atau forum terbaru.'
+          : 'Koneksi ke Moodle sedang bermasalah. Jawaban ini dari panduan penggunaan Moodle, bukan materi atau forum terbaru.';
+      }
+    } catch (e) {
+      console.warn('[Degraded] cek kesehatan Moodle gagal:', e.message);
+    }
+
     return response.success(res, 'Pesan berhasil diproses', result, 200);
   }),
 

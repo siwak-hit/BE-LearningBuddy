@@ -284,6 +284,41 @@ const moodleService = {
     return moodleService.callByProjectId(projectId, 'core_webservice_get_site_info');
   },
 
+  // [v0.9.52] Cache status kesehatan koneksi Moodle per-project untuk mendeteksi
+  // "mode darurat": token kadaluarsa / endpoint mati / project belum dikonfigurasi.
+  // Ping ringan (core_webservice_get_site_info) di-cache ~5 menit agar tidak menekan
+  // Moodle tiap pesan. Selalu resolve (tidak pernah throw) — aman dipanggil di alur chat.
+  _healthCache: new Map(), // projectId -> { degraded, reason, ts }
+
+  clearHealthCache(projectId) {
+    if (projectId) moodleService._healthCache.delete(projectId);
+    else moodleService._healthCache.clear();
+  },
+
+  async isMoodleDegraded(projectId) {
+    if (!projectId) return { degraded: true, reason: 'no_project' };
+    const TTL = Number(process.env.MOODLE_HEALTH_TTL_MS || 300000); // 5 menit
+    const now = Date.now();
+    const cached = moodleService._healthCache.get(projectId);
+    if (cached && (now - cached.ts) < TTL) {
+      return { degraded: cached.degraded, reason: cached.reason };
+    }
+
+    let degraded = false;
+    let reason = null;
+    try {
+      await moodleService.getSiteInfo(projectId);
+    } catch (e) {
+      degraded = true;
+      const msg = String(e?.message || '');
+      if (/invalidtoken|accesskey|token/i.test(msg)) reason = 'token';
+      else if (/timeout|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|HTTP Error/i.test(msg)) reason = 'connection';
+      else reason = 'unknown';
+    }
+    moodleService._healthCache.set(projectId, { degraded, reason, ts: now });
+    return { degraded, reason };
+  },
+
   async getCourses(projectId) {
     return moodleService.callByProjectId(projectId, 'core_course_get_courses');
   },

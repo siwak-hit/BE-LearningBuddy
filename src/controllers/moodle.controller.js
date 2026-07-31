@@ -87,6 +87,10 @@ const moodleController = {
 
       const saved = await moodleConfigModel.upsertByProjectId(projectId, payload);
 
+      // [v0.9.52] Token baru sudah tervalidasi (testConnection lolos) → reset cache health
+      // agar "mode darurat" langsung pulih tanpa menunggu TTL 5 menit.
+      moodleService.clearHealthCache(projectId);
+
       if (discovered?.course_routes?.length) {
         await lmsRouteModel.bulkUpsertCourseRoutes(projectId, discovered.course_routes).catch((err) => {
           console.warn('[Moodle Controller] Gagal upsert course routes:', err.message);
@@ -163,7 +167,19 @@ const moodleController = {
       if (!resolvedProjectId) return response.error(res, 'projectId/projectKey diperlukan', null, 400);
       if (!email) return response.error(res, 'Email siswa diperlukan', null, 400);
 
-      const identity = await moodleService.resolveStudentByEmail(resolvedProjectId, email, { classCode, courseId });
+      let identity;
+      try {
+        identity = await moodleService.resolveStudentByEmail(resolvedProjectId, email, { classCode, courseId });
+      } catch (e) {
+        // [v0.9.52] Moodle tak bisa dihubungi (token kadaluarsa / endpoint mati / belum
+        // pernah sinkron) → jangan blokir total; tawarkan MODE TAMU (panduan saja).
+        const health = await moodleService.isMoodleDegraded(resolvedProjectId).catch(() => ({ degraded: true, reason: 'connection' }));
+        return response.success(res, 'Moodle tidak dapat dihubungi', {
+          found: false, email, class_code: classCode || null,
+          degraded: true, degraded_reason: health.reason || 'connection', allow_guest: true,
+          message: 'Koneksi ke Moodle sedang bermasalah, email belum bisa diverifikasi. Kamu tetap bisa masuk sebagai tamu untuk memakai panduan penggunaan Moodle.'
+        });
+      }
 
       if (identity.found && sessionId) {
         const session = await chatModel.getSessionById(sessionId);
@@ -197,6 +213,18 @@ const moodleController = {
               course_id: sessionMeta.course_id,
               enrolled_courses: sessionMeta.enrolled_courses
             }
+          });
+        }
+      }
+
+      // [v0.9.52] Email tak ditemukan TAPI Moodle memang sedang bermasalah → izinkan tamu.
+      // (Kalau Moodle sehat & email memang tak terdaftar, tetap ditolak seperti biasa.)
+      if (!identity.found) {
+        const health = await moodleService.isMoodleDegraded(resolvedProjectId).catch(() => ({ degraded: false }));
+        if (health.degraded) {
+          return response.success(res, 'Moodle bermasalah — mode tamu', {
+            ...identity, degraded: true, degraded_reason: health.reason || 'connection', allow_guest: true,
+            message: 'Koneksi ke Moodle sedang bermasalah. Kamu bisa masuk sebagai tamu (mode panduan penggunaan Moodle).'
           });
         }
       }
@@ -338,6 +366,8 @@ const moodleController = {
       const summary = await moodleContentSyncService.syncAllCourses(projectId, {
         resetMoodleChunks, includeResource: includeResource === true
       });
+      // [v0.9.52] Sinkron sukses → Moodle pasti bisa dihubungi; reset cache health.
+      moodleService.clearHealthCache(projectId);
       return response.success(res, 'Sync semua course Moodle selesai', summary);
     } catch (error) {
       return response.error(res, 'Gagal sync semua course', error.message, 500);

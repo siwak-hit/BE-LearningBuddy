@@ -2644,7 +2644,7 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
     // harus diproses oleh handler mention (cache-first → AI dari isi materi).
     const hasMateriMention = mention?.type === 'materi' && (mention.documentId || mention.title || mention.sourceUrl || mention.url || mention.label);
     const staticTutorialKey = resolveStaticTutorialKey(detectedIntent, effectiveMessage);
-    if (staticTutorialKey && !forceAI && !hasMateriMention) {
+    if (staticTutorialKey && !hasMateriMention) {
       // [v0.9.9] Kalau user menyebut tugas/aktivitas spesifik & ada instruksinya di KB,
       // sisipkan info tugas itu (instruksi+tenggat) SEBELUM tutorial visual.
       let activityInfo = '';
@@ -2654,6 +2654,59 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
           const matched = findMatchingActivity(acts, effectiveMessage);
           if (matched) activityInfo = buildActivityInfoText(matched);
         } catch (e) { console.warn('[Chat] Gagal cek instruksi aktivitas spesifik:', e.message); }
+      }
+
+      // [v0.9.52] MODE AI untuk intent panduan (mis. "cara login" saat siswa pilih AI):
+      // beri langkah-langkah dalam TEKS dulu, lalu tombol "Lihat Panduan Bergambar".
+      // Grounding pakai pertanyaan asli; kalau kuota AI habis → fallback teks FAQ deterministik.
+      // (Mode Sistem tetap: tampilkan carousel panduan langsung — lihat di bawah.)
+      if (forceAI) {
+        const tut = STATIC_TUTORIALS[staticTutorialKey];
+        if (tut) {
+          const guideUsage = aiRateLimitService.consume(sessionId);
+          const prompt = buildAiFollowupPromptForTutorial(tut, effectiveMessage);
+          let stepsText = '';
+          let usedModel = 'guidance_ai';
+          let source = 'ai';
+          try {
+            const g = await aiQueueService.add(
+              () => geminiService.generateWithFallback(prompt),
+              { sessionId, intent: detectedIntent, responseMode }
+            );
+            if (g?.ok && g.text) { stepsText = g.text; usedModel = g.model || 'guidance_ai'; }
+          } catch (e) { console.warn('[Guidance AI] gagal:', e.message); }
+
+          if (!stepsText) {
+            const faq = QUICK_GUIDE_FAQ_MAP[detectedIntent];
+            stepsText = (faq && faq.fallbackMessage) || tut.intro || 'Berikut langkah-langkah singkatnya.';
+            usedModel = 'guidance_faq_fallback';
+            source = 'system';
+          }
+
+          const bodyText = activityInfo ? `${activityInfo}\n\n———\n\n${stepsText}` : stepsText;
+          const finalMsg = addStudentGreeting(bodyText, studentName);
+          const guideActions = [
+            {
+              type: 'static_tutorial_carousel',
+              label: `Lihat Panduan Bergambar: ${tut.shortTitle || tut.title}`,
+              payload: cloneStaticTutorial(tut)
+            },
+            ...(tut.video ? [{ type: 'video_tutorial', label: `Tonton Video: ${tut.shortTitle || tut.title}`, url: tut.video, title: tut.title }] : []),
+            { type: 'system_feedback_ok', label: 'Sudah jelas' }
+          ];
+
+          await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
+          await chatModel.createMessage({
+            session_id: sessionId, role: 'assistant', message: finalMsg, intent: detectedIntent,
+            context_used: { response_source: source, actions: guideActions, used_model: usedModel, static_tutorial_key: staticTutorialKey }
+          });
+
+          return {
+            intent: detectedIntent, response_source: source, ai_usage: guideUsage,
+            is_locked: safetyState.locked, warnings: safetyState.warnings,
+            botMessage: { message: finalMsg, actions: guideActions }
+          };
+        }
       }
 
       const staticGuide = buildStaticTutorialChatResponse({

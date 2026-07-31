@@ -13,6 +13,21 @@ const authModel = {
     if (error) throw error;
 
     return data;
+  },
+
+  // [v0.9.55] Buat akun guru baru. Pakai admin.createUser + email_confirm:true supaya
+  // akun langsung bisa dipakai login (tanpa langkah konfirmasi email). Gerbang keamanan
+  // (kode registrasi) divalidasi di controller sebelum fungsi ini dipanggil.
+  async register(email, password) {
+    const { data, error } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true
+    });
+
+    if (error) throw error;
+
+    return data;
   }
 };
 
