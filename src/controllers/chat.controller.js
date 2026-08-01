@@ -14,6 +14,7 @@ const lmsRouteModel = require('../models/lmsRoute.model');
 const moodleConfigModel = require('../models/moodleConfig.model');
 const moodleStudentModel = require('../models/moodleStudent.model');
 const difficultyService = require('../services/ai/difficulty.service');
+const intentService = require('../services/ai/intent.service');
 const recommendationService = require('../services/ai/recommendation.service');
 
 // Apakah dua waktu berada pada hari kalender yang sama (zona Asia/Jakarta)?
@@ -317,6 +318,14 @@ const chatController = {
       result.recommendation = recommendationService.build(result.difficulty.level, { intent: result.intent });
     } catch (e) {
       console.warn('[Difficulty] gagal analisa:', e.message);
+    }
+
+    // [v0.9.63] Label transparansi intent (estimasi keyword) untuk pesan yang DIKETIK siswa.
+    // FE menampilkan hanya untuk pesan ketik-sendiri (bukan @mention / tombol sidebar).
+    try {
+      result.intent_scores = intentService.scoreIntents(message, result.intent);
+    } catch (e) {
+      console.warn('[IntentScores] gagal:', e.message);
     }
 
     // [v0.9.52] Mode darurat: bila koneksi Moodle bermasalah (token kadaluarsa / endpoint

@@ -446,8 +446,67 @@ Pesan user:
   }
 }
 
+// [v0.9.63] Skor intent (heuristik keyword) untuk LABEL transparansi di UI. BUKAN probabilitas
+// sungguhan — routing tetap rule-based; ini estimasi kepercayaan berbasis kecocokan kata kunci.
+const INTENT_LABEL = {
+  komplain: 'Komplain', small_talk: 'Obrolan Ringan', greeting: 'Sapaan',
+  bantuan_login: 'Cara Login', bantuan_logout: 'Cara Logout',
+  bantuan_tugas: 'Bantuan Tugas', bantuan_kumpul_tugas: 'Kumpul Tugas',
+  bantuan_kuis: 'Bantuan Kuis', bantuan_quiz: 'Bantuan Kuis', bantuan_forum: 'Bantuan Forum',
+  penjelasan_materi: 'Penjelasan Materi', general_learning_help: 'Bantuan Belajar',
+  daftar_materi: 'Daftar Materi', rekomendasi_materi: 'Rekomendasi Materi',
+  klarifikasi: 'Klarifikasi', detail_tugas: 'Detail Tugas', detail_kuis: 'Detail Kuis',
+  cek_tugas_belum_selesai: 'Cek Tugas', cek_quiz_belum_dikerjakan: 'Cek Kuis',
+  cek_forum_belum_dijawab: 'Cek Forum', cek_deadline_hari_ini: 'Cek Deadline',
+  cek_deadline_terdekat: 'Cek Deadline', bantuan_lihat_nilai: 'Lihat Nilai',
+  cek_pengajar_course: 'Info Pengajar', hubungi_guru: 'Hubungi Guru',
+  minta_jawaban_langsung: 'Minta Jawaban', soal_pilihan_ganda: 'Soal Pilihan Ganda',
+  fitur_tidak_didukung: 'Fitur Tak Didukung', tanya_password: 'Tanya Password',
+  out_of_context: 'Di Luar Topik', bantuan_burnout: 'Butuh Dukungan',
+  bantuan_lupa_password: 'Lupa Password'
+};
+const INTENT_KEYWORDS = {
+  komplain: ['komplain', 'protes', 'keberatan', 'kecewa', 'tidak adil', 'gak adil', 'nilai kecil', 'nilai jelek', 'nilai rendah', 'gak puas', 'tidak puas', 'mengeluh', 'padahal udah', 'kesel'],
+  small_talk: ['halo', 'hai', 'apa kabar', 'siapa kamu', 'kamu siapa', 'makasih', 'terima kasih', 'thanks', 'keren', 'hebat', 'mantap', 'pinter'],
+  bantuan_login: ['login', 'masuk akun', 'cara masuk'],
+  bantuan_tugas: ['tugas', 'assignment', 'kumpul', 'submit', 'unggah tugas'],
+  bantuan_kuis: ['kuis', 'quiz', 'ujian', 'soal', 'attempt'],
+  bantuan_forum: ['forum', 'diskusi', 'balas', 'reply', 'topik'],
+  penjelasan_materi: ['jelaskan', 'apa itu', 'pengertian', 'maksud', 'pembahasan', 'konsep', 'arti'],
+  daftar_materi: ['materi apa aja', 'daftar materi', 'list materi', 'ada materi apa'],
+  rekomendasi_materi: ['harus dipelajari', 'saran materi', 'prioritas', 'sebaiknya pelajari', 'belajar apa dulu'],
+  klarifikasi: ['lebih sederhana', 'maksudnya', 'belum paham', 'ulangi', 'simpel', 'gak ngerti'],
+  hubungi_guru: ['hubungi guru', 'tanya guru', 'kontak guru', 'bantuan guru', 'chat guru'],
+  minta_jawaban_langsung: ['jawabannya', 'kunci jawaban', 'jawab langsung', 'kasih jawaban'],
+  fitur_tidak_didukung: ['ubah password', 'ganti password', 'ganti email', 'hapus akun', 'ganti nama', 'ubah profil'],
+  cek_tugas_belum_selesai: ['tugas belum', 'belum selesai', 'tugas apa aja', 'belum dikerjakan'],
+  cek_deadline_hari_ini: ['deadline', 'tenggat', 'batas waktu'],
+  bantuan_lihat_nilai: ['lihat nilai', 'cek nilai', 'nilai saya', 'berapa nilai'],
+  bantuan_burnout: ['capek', 'stres', 'pusing', 'nyerah', 'lelah', 'burnout']
+};
+
+function scoreIntents(message = '', primaryIntent = '') {
+  const t = normalizeText(message);
+  const raw = {};
+  for (const [intent, kws] of Object.entries(INTENT_KEYWORDS)) {
+    let s = 0;
+    for (const kw of kws) if (t.includes(kw)) s += Math.max(1, Math.round(String(kw).length / 4));
+    if (s > 0) raw[intent] = s;
+  }
+  // Intent yang BENAR-BENAR dipakai routing wajib jadi yang dominan.
+  if (primaryIntent) raw[primaryIntent] = (raw[primaryIntent] || 0) + 4;
+  const entries = Object.entries(raw).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  if (!entries.length) return [];
+  const total = entries.reduce((sum, [, v]) => sum + v, 0) || 1;
+  const scored = entries.map(([intent, v]) => ({ intent, label: INTENT_LABEL[intent] || String(intent).replace(/_/g, ' '), percent: Math.round((v / total) * 100) }));
+  const sum = scored.reduce((s, x) => s + x.percent, 0);
+  if (scored[0]) scored[0].percent += (100 - sum); // rapikan agar total 100
+  return scored;
+}
+
 const intentService = {
   ALLOWED_INTENTS,
+  scoreIntents,
 
   async detect(message, elementContext = null, options = {}) {
     const byRule = ruleBasedDetect(message, elementContext);
