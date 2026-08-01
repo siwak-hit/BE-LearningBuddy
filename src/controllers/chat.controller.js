@@ -10,6 +10,7 @@ const studentSessionRegistryModel = require('../models/studentSessionRegistry.mo
 const lmsContextService = require('../services/moodle/lms-context.service');
 const documentModel = require('../models/document.model');
 const moodleService = require('../services/moodle/moodle.service');
+const gradeUtil = require('../services/moodle/grade-util');
 const lmsRouteModel = require('../models/lmsRoute.model');
 const moodleConfigModel = require('../models/moodleConfig.model');
 const moodleStudentModel = require('../models/moodleStudent.model');
@@ -665,67 +666,62 @@ const chatController = {
     const fail = (reason) => response.success(res, 'grade', { graded: false, grade: null, title, reason }, 200);
     if (!courseId || !userId) return fail('no_context');
 
-    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-    const clean = (s) => String(s == null ? '' : s).replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
-
-    // [v0.9.68] SUMBER UTAMA: gradebook Moodle (gradereport_user_get_grade_items).
-    // Dulu nilai ditebak lewat mod_assign/mod_quiz — sering balik "not_found" karena
-    // WS itu hanya mengembalikan aktivitas yang bisa diakses token. Gradebook memuat
-    // semua item + nilai terformat sekaligus, jadi lebih akurat & cukup 1 panggilan.
-    try {
-      const gradeRes = await moodleService.getUserGradeItems(projectId, courseId, userId);
-      const items = (gradeRes?.usergrades || []).flatMap((u) => (u.gradeitems || []));
-      const wantQuiz = /kuis|quiz/i.test(type);
-      const wanted = norm(title);
-      const pool = items.filter((it) => String(it.itemmodule || '') === (wantQuiz ? 'quiz' : 'assign'));
-      const matchIn = (list) => list.find((it) => norm(it.itemname) === wanted)
-        || list.find((it) => wanted && norm(it.itemname).includes(wanted))
-        || list.find((it) => norm(it.itemname) && wanted.includes(norm(it.itemname)));
-      const item = matchIn(pool) || matchIn(items);
-
-      console.log('[ItemGrade] gradebook:', JSON.stringify({
-        courseId, userId, type, title, items: items.length, pool: pool.length, matched: item?.itemname || null
-      }));
-
-      if (item) {
-        const shown = clean(item.gradeformatted);
-        const hasGrade = (item.graderaw != null && item.graderaw !== '') || (shown && !/^-+$/.test(shown));
-        return response.success(res, 'grade', {
-          graded: Boolean(hasGrade),
-          grade: hasGrade ? (shown || String(item.graderaw)) : null,
-          maxgrade: item.grademax != null ? clean(String(item.grademax)).replace(/\.00$/, '') : null,
-          percent: clean(item.percentageformatted).replace(/^-+$/, '') || null,
-          feedback: clean(item.feedback) || null,
-          title: item.itemname || title,
-          reason: hasGrade ? null : 'not_graded'
-        }, 200);
-      }
-    } catch (e) {
-      // WS gradebook belum diizinkan admin → jatuh ke cara lama di bawah.
-      console.warn('[ItemGrade] gradebook gagal:', e.message);
-    }
-
-    // FALLBACK (kalau gradereport_user_get_grade_items belum diaktifkan di token Moodle).
+    // [v0.9.69] NILAI diambil per-jenis dari WS yang tersedia di token (gradebook
+    // `gradereport_user_get_grade_items` TIDAK aktif di server ini):
+    //   Tugas → mod_assign_get_submission_status (feedback.gradefordisplay + komentar guru)
+    //   Kuis  → mod_quiz_get_user_quiz_attempts (sumgrades, DISKALA ke nilai maks kuis)
+    // Daftar tugas/kuis per course di-cache (modal Komplain Nilai memanggilnya berulang);
+    // status/attempt siswa TIDAK di-cache agar nilai terbaru selalu terbaca.
+    const clean = (s) => String(s == null ? '' : s).replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').replace(/\.00(?=\D|$)/g, '').trim();
     try {
       if (/kuis|quiz/i.test(type)) {
-        const data = await moodleService.getQuizzes(projectId, [courseId]);
+        const data = await moodleService.cached(`quizzes:${projectId}:${courseId}`,
+          () => moodleService.getQuizzes(projectId, [courseId]));
         const quizzes = (data?.quizzes || []).filter((q) => String(q.course) === String(courseId));
-        const quiz = quizzes.find((q) => norm(q.name) === norm(title)) || quizzes.find((q) => norm(q.name).includes(norm(title)));
+        const quiz = quizzes.find((q) => gradeUtil.normName(q.name) === gradeUtil.normName(title))
+          || quizzes.find((q) => gradeUtil.nameMatches(q.name, title));
+        console.log('[ItemGrade] quiz:', JSON.stringify({ courseId, userId, title, available: quizzes.map((q) => q.name), matched: quiz?.name || null }));
         if (!quiz) return fail('not_found');
+
         const at = await moodleService.getUserQuizAttempts(projectId, quiz.id, userId);
         const finished = (at?.attempts || []).filter((a) => String(a.state) === 'finished');
         const last = finished[finished.length - 1];
-        const grade = last?.sumgrades != null && last.sumgrades !== '' ? String(last.sumgrades) : null;
-        return response.success(res, 'grade', { graded: grade != null, grade, title: quiz.name, maxgrade: quiz.grade != null ? String(quiz.grade) : null }, 200);
+        if (!last || last.sumgrades == null || last.sumgrades === '') {
+          return response.success(res, 'grade', { graded: false, grade: null, title: quiz.name, reason: 'not_graded' }, 200);
+        }
+        const graded = gradeUtil.scaleQuizGrade(last.sumgrades, quiz.sumgrades, quiz.grade);
+        const dispMax = Number(quiz.grade) > 0 ? gradeUtil.fmtNum(quiz.grade)
+          : (Number(quiz.sumgrades) > 0 ? gradeUtil.fmtNum(quiz.sumgrades) : null);
+        return response.success(res, 'grade', {
+          graded: true, grade: gradeUtil.fmtNum(graded), maxgrade: dispMax, title: quiz.name
+        }, 200);
       }
-      const data = await moodleService.getAssignments(projectId, [courseId]);
+
+      const data = await moodleService.cached(`assigns:${projectId}:${courseId}`,
+        () => moodleService.getAssignments(projectId, [courseId]));
       let assign = null;
-      (data?.courses || []).forEach((c) => { (c.assignments || []).forEach((a) => { if (!assign && (norm(a.name) === norm(title) || norm(a.name).includes(norm(title)))) assign = a; }); });
+      (data?.courses || []).forEach((c) => { (c.assignments || []).forEach((a) => { if (!assign && gradeUtil.nameMatches(a.name, title)) assign = a; }); });
+      const available = (data?.courses || []).flatMap((c) => (c.assignments || []).map((a) => a.name));
+      console.log('[ItemGrade] assign:', JSON.stringify({ courseId, userId, title, available, matched: assign?.name || null }));
       if (!assign) return fail('not_found');
+
       const ss = await moodleService.getAssignmentSubmissionStatus(projectId, assign.id, userId);
-      const g = ss?.feedback?.gradefordisplay || ss?.feedback?.grade?.grade;
-      const grade = g != null ? String(g).replace(/<[^>]*>/g, '').trim() : null;
-      return response.success(res, 'grade', { graded: !!(grade && grade !== '-'), grade, title: assign.name }, 200);
+      const fb = ss?.feedback || {};
+      const shown = clean(fb.gradefordisplay != null ? fb.gradefordisplay : (fb.grade && fb.grade.grade));
+      const hasGrade = Boolean(shown) && !/^-+$/.test(shown) && shown.toLowerCase() !== 'null';
+      // Komentar/feedback guru (plugin editor) → ditampilkan di modal.
+      let fbText = '';
+      (fb.plugins || []).forEach((p) => { (p.editorfields || []).forEach((ef) => { if (ef.text) fbText += ' ' + clean(ef.text); }); });
+      const dispMax = Number(assign.grade) > 0 ? gradeUtil.fmtNum(assign.grade) : null;
+      return response.success(res, 'grade', {
+        graded: hasGrade,
+        grade: hasGrade ? shown : null,
+        // gradefordisplay kadang sudah "80 / 100" → jangan tempel maks lagi.
+        maxgrade: hasGrade && !/\//.test(shown) ? dispMax : null,
+        feedback: clean(fbText) || null,
+        title: assign.name,
+        reason: hasGrade ? null : 'not_graded'
+      }, 200);
     } catch (e) {
       console.warn('[ItemGrade] gagal:', e.message);
       return fail('error');

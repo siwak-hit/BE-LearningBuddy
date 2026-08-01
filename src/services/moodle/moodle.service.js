@@ -415,18 +415,6 @@ const moodleService = {
     return cachedCall(key, loader);
   },
 
-  // [v0.9.68] NILAI siswa satu course lewat GRADEBOOK Moodle. Satu panggilan mengembalikan
-  // SEMUA item (tugas/kuis/dll) beserta nilai terformat, nilai maks, persen, dan feedback —
-  // jauh lebih andal daripada menebak lewat mod_assign/mod_quiz (yang butuh token ikut
-  // ter-enroll di course). Di-cache karena modal Komplain Nilai memanggilnya berkali-kali.
-  async getUserGradeItems(projectId, courseId, userId) {
-    return cachedCall(`gradeitems:${projectId}:${courseId}:${userId}`, () =>
-      moodleService.callByProjectId(projectId, 'gradereport_user_get_grade_items', {
-        courseid: courseId,
-        userid: userId
-      }));
-  },
-
   // [v0.9.14] Review lembar jawaban satu attempt (per-soal: status, html soal+jawaban).
   // CATATAN: butuh WS function `mod_quiz_get_attempt_review` diaktifkan admin Moodle.
   async getQuizAttemptReview(projectId, attemptId) {
