@@ -18,7 +18,10 @@ const ALLOWED_INTENTS = [
   'cek_quiz_belum_dikerjakan', 'cek_forum_belum_dijawab', 'cek_aktivitas_course',
   'cek_pengajar_course', 'cek_course_saya', 'buka_aktivitas', 'tanya_password',
   'daftar_materi', 'sengketa_jawaban',
-  'cek_status_tugas', 'cek_status_completion', 'evaluasi_jawaban_tugas', 'komplain'
+  'cek_status_tugas', 'cek_status_completion', 'evaluasi_jawaban_tugas', 'komplain',
+  // [v0.9.62] Intent baru dari pemetaan ruang lingkup
+  'small_talk', 'fitur_tidak_didukung', 'greeting', 'soal_pilihan_ganda', 'detail_tugas', 'detail_kuis',
+  'rekomendasi_materi', 'klarifikasi'
 ];
 
 // [v0.9.15] Kata pengisi di AKHIR kalimat yang TIDAK mengubah maksud. Distrip agar
@@ -120,6 +123,28 @@ function ruleBasedDetect(message = '', elementContext = null) {
     return 'cek_deadline_terdekat';
   }
 
+  // [v0.9.62] Recommendation: "materi apa yang harus/sebaiknya dipelajari/prioritaskan".
+  if (hasAny(msg, [
+    /(materi|belajar) apa (yang )?(harus|sebaiknya|perlu|mesti)/,
+    /(saran|rekomendasi|rekomen)(kan|in)?.{0,12}(materi|belajar|dipelajari|pelajari)/,
+    /(materi|belajar) apa dulu/,
+    /materi prioritas|prioritas materi/,
+    /apa (yang )?(harus|sebaiknya|perlu) (saya |aku )?(pelajari|dipelajari|prioritaskan)/
+  ])) {
+    return 'rekomendasi_materi';
+  }
+
+  // [v0.9.62] Clarification: minta penjelasan ulang / versi lebih sederhana.
+  if (hasAny(msg, [
+    /(jelas(kan|in)?|terang(kan|in)?).{0,15}(lebih )?(sederhana|simpel|mudah|gampang|singkat)/,
+    /maksud(nya)?\s*(gimana|apa|nya apa)/,
+    /(ulangi|ulang lagi|jelas(kan|in)? (lagi|ulang)|jelasin ulang)/,
+    /(masih |belum |kurang |gak |nggak )(paham|ngerti|mudeng|jelas)/,
+    /(versi|bikin).{0,10}(lebih )?(sederhana|simpel|mudah)/
+  ])) {
+    return 'klarifikasi';
+  }
+
   // [v0.9.9] "Ada materi apa aja / daftar materi" → list materi (BUKAN penjelasan konsep).
   // Diletakkan lebih awal agar tak tertangkap navigasi_kursus / penjelasan_materi.
   if (hasAny(msg, [
@@ -162,10 +187,34 @@ function ruleBasedDetect(message = '', elementContext = null) {
   // "jawaban kuis salah padahal benar" / "udah upload tapi belum masuk" sudah ditangani
   // intent spesifik di atas (sengketa_jawaban / cek_status_*). Sisanya yang sekadar
   // "aku mau komplain / ini gak adil / nggak terima" → arahkan ke template komplain.
+  // [v0.9.62] Small talk / apresiasi: sapaan lanjutan, tanya identitas, terima kasih, pujian.
   if (hasAny(msg, [
-    /\b(komplain|komplen|protes|keberatan)\b/,
-    /\b(tidak|gak|ga|nggak)\s+(adil|terima|setuju)\b/,
-    /\bmau\s+lapor(kan)?\b/
+    /\b(apa kabar|gimana kabar|kabarmu|kabar kamu)\b/,
+    /\b(siapa kamu|kamu siapa|kamu ini apa|kamu bisa apa|kamu apa sih)\b/,
+    /\b(terima kasih|makasih|makasih ya|thanks|thank you|trims|tengkyu|maacih)\b/,
+    /\b(keren|hebat|bagus banget|mantap|pinter|pintar|membantu banget|kamu baik)\b/
+  ])) {
+    return 'small_talk';
+  }
+
+  // [v0.9.62] Fitur belum didukung: mengubah kredensial/akun (bukan "lupa password").
+  if (hasAny(msg, [
+    /\b(ubah|ganti|rubah|update)\s+(password|kata sandi|sandi|email|e-mail|profil|nama|foto|username)\b/,
+    /\b(hapus|nonaktifkan|bikin|buat|daftar)\s+(akun|account)\b/
+  ])) {
+    return 'fitur_tidak_didukung';
+  }
+
+  // [v0.9.17 + v0.9.62] Komplain SAMAR / keluhan (termasuk keluhan nilai). Kasus spesifik
+  // (sengketa jawaban kuis / status upload) sudah ditangani intent lain di atas.
+  if (hasAny(msg, [
+    /\b(komplain|komplen|protes|keberatan|mengeluh|keluhan)\b/,
+    /\b(tidak|gak|ga|nggak)\s+(adil|terima|setuju|puas)\b/,
+    /\bmau\s+lapor(kan)?\b/,
+    /\bnilai(ku|nya)?\b(\s+\w+){0,3}\s*(kecil|jelek|rendah|turun|dikit|sedikit|kurang|anjlok|gak sesuai|tidak sesuai)/,
+    /\bkok\b(\s+\w+){0,5}\s*(nilai|kecil|jelek|rendah|belum masuk|gak masuk|tidak masuk|gak sesuai|tidak sesuai|salah)/,
+    /\b(kecewa|kesel|sebel|nggak puas|gak puas|tidak puas)\b/,
+    /padahal\s+(udah|sudah)\s+(ngerjain|kerjain|mengerjakan|kumpul|mengumpulkan|upload|submit|kirim)/
   ])) {
     return 'komplain';
   }

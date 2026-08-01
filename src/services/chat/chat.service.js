@@ -2614,6 +2614,98 @@ const chatService = {
     // dijawab bebas (mudah salah rute), tapi arahkan ke TEMPLATE komplain terpandu.
     // Tombol open_complaint akan membuka modal komplain di FE → submit di sana langsung
     // memicu algoritma yang tepat (sengketa kuis / status tugas / status forum).
+    // [v0.9.62] Small talk / apresiasi → jawab SISTEM ramah (varian).
+    if (detectedIntent === 'small_talk') {
+      const t = String(effectiveMessage || '').toLowerCase();
+      let reply;
+      if (/(siapa kamu|kamu siapa|kamu ini apa|kamu bisa apa|kamu apa)/.test(t)) {
+        reply = `Aku **AI Learning Buddy**, asisten belajar virtualmu di VClass. 😊 Aku bisa bantu soal cara pakai VClass (login, kumpul tugas, forum, kuis), menjelaskan materi, cek tugas/deadline, sampai menghubungkan kamu ke guru. Mau coba tanya apa?`;
+      } else if (/(terima kasih|makasih|thanks|thank you|trims|tengkyu|maacih)/.test(t)) {
+        reply = ['Sama-sama! Senang bisa bantu. 😊', 'Sama-sama ya! Kalau ada yang bingung lagi, tanya aku aja.', 'Dengan senang hati! Semangat belajarnya ya. 💪'][Math.floor(Math.random() * 3)];
+      } else if (/(keren|hebat|bagus|mantap|pinter|pintar|membantu|kamu baik)/.test(t)) {
+        reply = 'Wah, makasih! 😄 Aku senang bisa membantumu belajar. Ada lagi yang mau ditanyakan?';
+      } else {
+        reply = ['Aku baik, siap bantu kamu belajar! Kamu gimana? 😊', 'Selalu semangat bantu kamu! Ada yang bisa kubantu hari ini?'][Math.floor(Math.random() * 2)];
+      }
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'small_talk' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: reply, intent: 'small_talk', context_used: { response_source: 'system', actions: [], used_model: 'small_talk' } });
+      return { intent: 'small_talk', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: reply, actions: [] } };
+    }
+
+    // [v0.9.62] Fitur belum didukung (ubah password/email/akun) → arahkan ke guru/admin.
+    if (detectedIntent === 'fitur_tidak_didukung') {
+      const text = `Hai **${studentName}**, maaf ya — fitur untuk **mengubah data akun** (seperti password, email, nama, atau foto profil) **belum didukung** di AI Learning Buddy. 🙏\n\nUntuk urusan seperti itu, kamu perlu menghubungi **guru/admin VClass** langsung ya.`;
+      const actions = [{ type: 'wa_teacher', label: 'Hubungi Guru (WhatsApp)' }];
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'fitur_tidak_didukung' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'fitur_tidak_didukung', context_used: { response_source: 'system', actions, used_model: 'fitur_tidak_didukung' } });
+      return { intent: 'fitur_tidak_didukung', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions } };
+    }
+
+    // [v0.9.62] Recommendation → sarankan materi yang BELUM selesai (dari data Moodle).
+    if (detectedIntent === 'rekomendasi_materi') {
+      let materi = [];
+      try {
+        const acts = await loadLmsActivities({ projectId, sessionId, classCode, studentName, moodleUserId, studentEmail, courseId: fallbackCourseId, enrolledCourses, pageActivities, intent: 'daftar_materi' });
+        materi = acts.filter((a) => a.type === 'materi');
+      } catch (e) { console.warn('[Rekomendasi] gagal:', e.message); }
+
+      let text; let actions = [];
+      const belum = materi.filter((a) => a.status !== 'Selesai');
+      if (!materi.length) {
+        text = `Hai **${studentName}**, aku belum bisa melihat daftar materi kelasmu dari VClass sekarang. Coba buka halaman course-mu di VClass ya. 🙏`;
+      } else if (!belum.length) {
+        text = `Hai **${studentName}**, keren! 🎉 Sepertinya kamu sudah menyelesaikan semua materi yang ada. Kalau mau memperdalam, buka lagi materinya lewat **@** untuk minta rangkuman atau soal latihan ya.`;
+      } else {
+        const lines = belum.slice(0, 8).map((a, i) => `${i + 1}. **${escapeHtml(a.title)}**${a.status === 'Belum terbuka' ? ' 🔒 (belum terbuka)' : ''}`).join('\n');
+        text = `Hai **${studentName}**, ini saran materi yang sebaiknya kamu pelajari/selesaikan dulu:\n\n${lines}\n\nKetik **@** lalu pilih materinya untuk minta rangkuman, poin penting, atau soal latihan. 😊`;
+        const url = belum[0].course_url || belum[0].url;
+        if (url) actions = [{ type: 'open_url', label: 'Buka course di VClass', url }];
+      }
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'rekomendasi_materi' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'rekomendasi_materi', context_used: { response_source: 'system', actions, used_model: 'rekomendasi_materi' } });
+      return { intent: 'rekomendasi_materi', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions } };
+    }
+
+    // [v0.9.62] Clarification → jawab ULANG pertanyaan terakhir dengan bahasa lebih sederhana (AI).
+    if (detectedIntent === 'klarifikasi') {
+      let lastQ = '';
+      try {
+        const hist = await chatModel.getHistory(sessionId);
+        for (let i = (hist || []).length - 1; i >= 0; i -= 1) {
+          const m = hist[i];
+          if (m.role === 'user' && !/(sederhana|simpel|maksud|ulangi|paham|ngerti|mudeng|jelas(kan|in)? (lagi|ulang))/i.test(String(m.message || ''))) { lastQ = m.message; break; }
+        }
+      } catch (_) {}
+
+      if (!lastQ) {
+        const text = `Boleh sebutkan dulu bagian mana yang mau aku jelaskan lebih sederhana? Misalnya "jelaskan CMS dengan bahasa yang mudah" 😊`;
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'klarifikasi' });
+        await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'klarifikasi', context_used: { response_source: 'system', actions: [], used_model: 'klarifikasi_empty' } });
+        return { intent: 'klarifikasi', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions: [] } };
+      }
+
+      const g = aiRateLimitService.getGlobalUsage();
+      if (g.exhausted) {
+        const mins = Math.max(1, Math.ceil((g.resets_in_seconds || 0) / 60));
+        const text = `Maaf, **kuota AI bersama sedang penuh** (coba lagi ~${mins} menit lagi), jadi aku belum bisa menyederhanakan penjelasannya sekarang. 🙏`;
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'klarifikasi' });
+        await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'klarifikasi', context_used: { response_source: 'system', actions: [], used_model: 'ai_exhausted' } });
+        return { intent: 'klarifikasi', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions: [] } };
+      }
+
+      const prompt = `Kamu AI Learning Buddy untuk siswa SMP. Jelaskan ULANG hal berikut dengan bahasa yang JAUH lebih sederhana & mudah dipahami pemula, pakai analogi sederhana + poin pendek, jangan bertele-tele. Pertanyaan/topik siswa sebelumnya: "${String(lastQ).slice(0, 300)}".`;
+      let text = ''; let source = 'ai'; let usedModel = 'klarifikasi_ai';
+      try {
+        const gr = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { sessionId, intent: 'klarifikasi', responseMode: 'short' });
+        if (gr?.ok && gr.text) { text = gr.text; usedModel = gr.model || usedModel; aiRateLimitService.consume(sessionId); }
+      } catch (e) { console.warn('[Klarifikasi] AI gagal:', e.message); }
+      if (!text) { text = `Maaf, aku sedang kesulitan menyederhanakan penjelasannya. Coba ketik **@** lalu pilih materinya dan minta "jelaskan dengan bahasa sederhana" ya. 🙏`; source = 'system'; usedModel = 'klarifikasi_fallback'; }
+      const finalText = addStudentGreeting(text, studentName);
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'klarifikasi' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: finalText, intent: 'klarifikasi', context_used: { response_source: source, actions: [], used_model: usedModel } });
+      return { intent: 'klarifikasi', response_source: source, ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: finalText, actions: [] } };
+    }
+
     if (detectedIntent === 'komplain') {
       const komplainMsg = `Hai **${studentName}**,\n\nKamu mau menyampaikan komplain ya? Biar lebih jelas dan langsung diproses dengan benar, yuk pakai **form komplain terpandu** — kamu tinggal pilih jenisnya (Tugas/Kuis/Materi/Forum), nama bagiannya, lalu alasannya.\n\nKlik tombol di bawah ini ya 👇`;
       const komplainActions = [{ type: 'open_complaint', label: '📝 Buka Form Komplain' }];
