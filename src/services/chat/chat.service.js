@@ -182,6 +182,17 @@ function looksLikeMultipleChoiceQuestion(message = '') {
   return /(^|\n|\s)([A-Da-d])[\).]/.test(raw) || /\b(pilihan ganda|jawaban yang benar|pilih jawaban|opsi a|opsi b|opsi c|opsi d)\b/i.test(raw);
 }
 
+// [v0.9.61] Deteksi TEGAS "soal pilihan ganda yang minta dijawabkan" (anti-contek). Beda dari
+// looksLikeMultipleChoiceQuestion: minimal 2 opsi (A. … B. …) & MENGECUALIKAN permintaan
+// MEMBUAT soal ("buat 3 soal…") supaya generator latihan tetap jalan.
+function isMultipleChoiceQuiz(message = '') {
+  const raw = String(message || '');
+  if (/\b(buat|bikin|buatkan|bikinin|berikan|kasih)\b.{0,25}(soal|latihan|kuis|pertanyaan|pilihan ganda)/i.test(raw)) return false;
+  const opts = raw.match(/(^|\n|\s)([A-Da-d])[\).]\s/g) || [];
+  if (opts.length >= 2) return true;
+  return /\b(pilih(kan)? (jawaban|salah satu|opsi)|jawaban yang (benar|tepat)|opsi yang (benar|tepat))\b/i.test(raw);
+}
+
 
 function detectAcronymExpansionQuestion(message = '') {
   const raw = String(message || '');
@@ -2443,6 +2454,21 @@ const chatService = {
       await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'greeting', context_used: { response_source: 'system', actions: [], used_model: 'greeting' } });
       return {
         intent: 'greeting', response_source: 'system',
+        ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: text, actions: [] }
+      };
+    }
+
+    // [v0.9.61] HARD GUARD anti-contek: soal pilihan ganda yang minta dijawabkan → TOLAK
+    // beri A/B/C/D, apa pun modenya (termasuk AI). Diletakkan SEBELUM semua jalur AI supaya
+    // Gemini tak pernah melihat soalnya (dulu bisa bypass lewat mode AI).
+    if (!mention && !elementContext && isMultipleChoiceQuiz(effectiveMessage)) {
+      const text = `Hai **${studentName}**, ini kelihatannya **soal pilihan ganda**. Sesuai aturan belajar, aku **tidak akan memberi jawaban A/B/C/D secara langsung** ya — biar kamu benar-benar paham, bukan sekadar menyalin. 😊\n\nTapi aku senang bantu kamu **mengerti konsepnya**. Coba tanyakan konsep di balik soal itu **tanpa pilihannya**, misalnya "apa itu CMS?" atau "jelaskan tentang WordPress".`;
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'soal_pilihan_ganda' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'soal_pilihan_ganda', context_used: { response_source: 'system', actions: [], used_model: 'mcq_guard' } });
+      return {
+        intent: 'soal_pilihan_ganda', response_source: 'system',
         ai_usage: aiRateLimitService.getStatus(sessionId),
         is_locked: safetyState.locked, warnings: safetyState.warnings,
         botMessage: { message: text, actions: [] }
