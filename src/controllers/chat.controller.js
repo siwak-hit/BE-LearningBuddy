@@ -642,6 +642,53 @@ const chatController = {
     return response.success(res, 'Aktivitas kelas berhasil diambil', grouped, 200);
   }),
 
+  // [v0.9.67] Ambil NILAI satu tugas/kuis untuk siswa (dipakai modal Komplain Nilai).
+  getItemGrade: asyncHandler(async (req, res) => {
+    const { sessionId } = req.params;
+    const type = String(req.query.type || '');
+    const title = String(req.query.title || '');
+    if (!sessionId || !type || !title) return response.error(res, 'sessionId, type, title diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const projectId = session.project_id;
+    const meta = (session.page_context || {}).session_meta || {};
+    const courseCtx = session.course_context || {};
+    const classCode = lmsContextService.getClassCodeFromSession(session);
+    let courseId = meta.course_id || courseCtx.course_id || session.page_context?.course_id || null;
+    if (!courseId && classCode) { try { const r = await lmsRouteModel.findCourseRoute(projectId, classCode); courseId = r?.course_id || null; } catch (_) {} }
+    const { userId } = await resolveStudentUserId(projectId, meta, courseId);
+    const fail = (reason) => response.success(res, 'grade', { graded: false, grade: null, title, reason }, 200);
+    if (!courseId || !userId) return fail('no_context');
+
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+    try {
+      if (/kuis|quiz/i.test(type)) {
+        const data = await moodleService.getQuizzes(projectId, [courseId]);
+        const quizzes = (data?.quizzes || []).filter((q) => String(q.course) === String(courseId));
+        const quiz = quizzes.find((q) => norm(q.name) === norm(title)) || quizzes.find((q) => norm(q.name).includes(norm(title)));
+        if (!quiz) return fail('not_found');
+        const at = await moodleService.getUserQuizAttempts(projectId, quiz.id, userId);
+        const finished = (at?.attempts || []).filter((a) => String(a.state) === 'finished');
+        const last = finished[finished.length - 1];
+        const grade = last?.sumgrades != null && last.sumgrades !== '' ? String(last.sumgrades) : null;
+        return response.success(res, 'grade', { graded: grade != null, grade, title: quiz.name, maxgrade: quiz.grade != null ? String(quiz.grade) : null }, 200);
+      }
+      const data = await moodleService.getAssignments(projectId, [courseId]);
+      let assign = null;
+      (data?.courses || []).forEach((c) => { (c.assignments || []).forEach((a) => { if (!assign && (norm(a.name) === norm(title) || norm(a.name).includes(norm(title)))) assign = a; }); });
+      if (!assign) return fail('not_found');
+      const ss = await moodleService.getAssignmentSubmissionStatus(projectId, assign.id, userId);
+      const g = ss?.feedback?.gradefordisplay || ss?.feedback?.grade?.grade;
+      const grade = g != null ? String(g).replace(/<[^>]*>/g, '').trim() : null;
+      return response.success(res, 'grade', { graded: !!(grade && grade !== '-'), grade, title: assign.name }, 200);
+    } catch (e) {
+      console.warn('[ItemGrade] gagal:', e.message);
+      return fail('error');
+    }
+  }),
+
   // [v0.9.19] Komplain Kuis — daftar soal + jawaban siswa (untuk pilih nomor + preview).
   getQuizQuestions: asyncHandler(async (req, res) => {
     const { sessionId } = req.params;

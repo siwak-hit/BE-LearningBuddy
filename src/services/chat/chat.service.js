@@ -2351,60 +2351,10 @@ async function respondTugasKuisDetail(opts) {
   return wrap(text, actions);
 }
 
-// [v0.9.65] Keluhan tentang NILAI (bukan komplain umum) → cek nilai asli dulu lalu konfirmasi.
+// [v0.9.65] Keluhan tentang NILAI (bukan komplain umum) → dialihkan ke modal "Cek Nilai & Komplain".
 function isNilaiComplaint(message = '') {
   const t = String(message || '').toLowerCase();
   return /\bnilai\b/.test(t) && /(kecil|jelek|rendah|turun|dikit|sedikit|kurang|anjlok|gak sesuai|tidak sesuai)/.test(t);
-}
-
-// Ambil nilai tugas siswa dari Moodle → tampilkan + tombol konfirmasi (Iya→guru / Tidak→selesai).
-// Balik null bila tak ada data yang bisa ditampilkan (caller pakai form komplain generik).
-async function buildNilaiComplaintResponse(opts) {
-  const { sessionId, projectId, moodleUserId, studentName, safetyState } = opts;
-  const wrap = (text, actions = []) => ({
-    intent: 'komplain', response_source: 'system',
-    ai_usage: aiRateLimitService.getStatus(sessionId),
-    is_locked: safetyState.locked, warnings: safetyState.warnings,
-    botMessage: { message: text, actions }
-  });
-
-  if (!moodleUserId) return null;
-
-  let acts = [];
-  try { acts = await loadLmsActivities({ ...opts, intent: 'cek_tugas_belum_selesai' }); }
-  catch (e) { console.warn('[NilaiComplaint] gagal load activities:', e.message); return null; }
-
-  const submitted = acts.filter((a) => a.type === 'assign' && /dikumpulkan|selesai|mengerjakan/i.test(String(a.status || '')));
-  if (!submitted.length) return null;
-
-  const graded = [];
-  const notGraded = [];
-  for (const a of submitted.slice(0, 5)) {
-    if (/belum dinilai/i.test(String(a.status || ''))) { notGraded.push(a); continue; }
-    try {
-      const data = await moodleService.getAssignmentSubmissionStatus(projectId, a.instance_id, moodleUserId);
-      const g = data?.feedback?.gradefordisplay || data?.feedback?.grade?.grade;
-      const gv = g != null ? String(g).replace(/<[^>]*>/g, '').trim() : '';
-      if (gv && gv !== '-') graded.push({ title: a.title, grade: gv });
-      else notGraded.push(a);
-    } catch (e) { console.warn('[NilaiComplaint] submissionStatus gagal:', e.message); }
-  }
-
-  if (!graded.length && !notGraded.length) return null;
-
-  if (!graded.length) {
-    const list = notGraded.slice(0, 5).map((a) => `• **${escapeHtml(a.title)}**`).join('\n');
-    return wrap(`Hai **${studentName}**, aku cek dulu ya. Tugas yang sudah kamu kumpulkan tapi **belum dinilai** guru:\n\n${list}\n\nNilai yang belum keluar itu wajar — mungkin guru belum sempat menilai. Kalau sudah lama dan kamu ingin menanyakannya, kamu bisa hubungi guru ya.`,
-      [{ type: 'wa_teacher', label: 'Hubungi Guru (WhatsApp)' }]);
-  }
-
-  const list = graded.map((g) => `• **${escapeHtml(g.title)}**: nilai **${escapeHtml(g.grade)}**`).join('\n');
-  const text = `Hai **${studentName}**, aku sudah cek hasil pengerjaanmu di VClass:\n\n${list}\n\nApakah menurutmu nilai di atas **kurang sesuai** dengan usahamu? 🤔`;
-  const actions = [
-    { type: 'wa_teacher', label: 'Iya, kurang sesuai — hubungi guru' },
-    { type: 'system_feedback_ok', label: 'Tidak, sudah sesuai kok' }
-  ];
-  return wrap(text, actions);
 }
 
 // FUNGSI UTAMA
@@ -2772,18 +2722,14 @@ const chatService = {
     }
 
     if (detectedIntent === 'komplain') {
-      // [v0.9.65] Keluhan NILAI → cek nilai asli dulu + konfirmasi (bukan langsung form generik).
+      // [v0.9.67] Keluhan NILAI → bubble + tombol buka MODAL "Cek Nilai & Komplain"
+      // (pilih tugas/kuis → cek nilai → konfirmasi kecil? → hubungi guru / selesai).
       if (isNilaiComplaint(effectiveMessage)) {
-        const nilaiRes = await buildNilaiComplaintResponse({
-          sessionId, projectId, classCode, studentName, moodleUserId, studentEmail,
-          courseId: fallbackCourseId, enrolledCourses, pageActivities, safetyState
-        });
-        if (nilaiRes) {
-          await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'komplain' });
-          await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: nilaiRes.botMessage.message, intent: 'komplain', context_used: { response_source: 'system', actions: nilaiRes.botMessage.actions, used_model: 'komplain_nilai' } });
-          return nilaiRes;
-        }
-        // Kalau data nilai tak tersedia → jatuh ke form komplain generik di bawah.
+        const text = `Hai **${studentName}**, kamu mau komplain soal **nilai** ya? Yuk aku bantu cek dulu. Klik tombol di bawah, lalu pilih tugas/kuis yang kamu maksud — nanti aku tunjukkan nilaimu, dan kamu bisa lanjut hubungi guru kalau memang terasa kurang sesuai.`;
+        const actions = [{ type: 'open_grade_complaint', label: '📊 Cek Nilai & Komplain' }];
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'komplain' });
+        await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'komplain', context_used: { response_source: 'system', actions, used_model: 'komplain_nilai_modal' } });
+        return { intent: 'komplain', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId), is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions } };
       }
 
       const komplainMsg = `Hai **${studentName}**,\n\nKamu mau menyampaikan komplain ya? Biar lebih jelas dan langsung diproses dengan benar, yuk pakai **form komplain terpandu** — kamu tinggal pilih jenisnya (Tugas/Kuis/Materi/Forum), nama bagiannya, lalu alasannya.\n\nKlik tombol di bawah ini ya 👇`;

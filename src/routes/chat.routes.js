@@ -14,6 +14,7 @@ router.get('/session/:sessionId', chatController.getSessionById);
 router.get('/history/:sessionId', chatController.getHistory);
 router.get('/session-materials/:sessionId', chatController.getSessionMaterials);
 router.get('/session-activities/:sessionId', chatController.getSessionActivities); // [v0.9.17] dropdown form Komplain
+router.get('/item-grade/:sessionId', chatController.getItemGrade); // [v0.9.67] nilai 1 tugas/kuis (modal komplain nilai)
 router.get('/quiz-questions/:sessionId', chatController.getQuizQuestions); // [v0.9.19] preview soal Komplain Kuis
 router.post('/quiz-dispute', chatController.submitQuizDispute); // [v0.9.19] analisis sengketa Komplain Kuis
 router.get('/course-students/:sessionId', chatController.getCourseStudents); // [v0.9.26] fallback dropdown nama
