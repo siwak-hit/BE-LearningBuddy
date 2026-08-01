@@ -211,10 +211,7 @@ function actionButtons(activity = {}) {
   return `
     <div class="alb-task-actions" onclick="event.stopPropagation();" style="display:flex;flex-direction:row;align-items:center;gap:6px;flex-wrap:nowrap;">
       <a href="${url}" target="_blank" rel="noopener noreferrer" class="alb-btn-vclass-primary" title="${title}" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:7px 12px;border-radius:8px;border:0;background:#0f172a;color:#ffffff;font-size:12px;font-weight:800;line-height:1.2;white-space:nowrap;cursor:pointer;text-decoration:none;">
-        <i class="fa-solid fa-up-right-from-square"></i><span>${locked ? 'Lihat di VClass' : label}</span>
-      </a>
-      <a href="${url}" target="_blank" rel="noopener noreferrer" class="alb-btn-vclass-newtab" title="Buka di tab baru" style="display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border-radius:8px;border:1px solid #e2e8f0;background:#ffffff;color:#475569;font-size:13px;line-height:1;text-decoration:none;white-space:nowrap;">
-        <i class="fa-solid fa-up-right-from-square"></i>
+        <i class="fa-solid fa-up-right-from-square"></i><span>Lihat di VClass</span>
       </a>
     </div>`;
 }

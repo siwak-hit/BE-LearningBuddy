@@ -18,6 +18,14 @@ const geminiService = {
       throw new Error('GEMINI_API_KEY belum dikonfigurasi di file .env');
     }
 
+    // [v0.9.58] Gerbang budget AI bersama (per jam). Kalau sudah penuh → jangan panggil
+    // Google & jangan tambah counter; balikkan quotaFallback supaya caller pakai fallback.
+    try {
+      if (aiRateLimitService.getGlobalUsage().exhausted) {
+        return { ok: false, model: null, text: null, quotaFallback: true };
+      }
+    } catch (_) {}
+
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
     // [v0.9.3] Catat 1 permintaan AI bersama (proxy RPD untuk bar kuota di FE).

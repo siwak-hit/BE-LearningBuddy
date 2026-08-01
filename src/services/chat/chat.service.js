@@ -2206,6 +2206,31 @@ function isAiFollowupPrompt(message = '', forceAI = false) {
   return /(tolong\s+jelaskan\s+lebih\s+detail\s+dengan\s+ai|jawaban\s+sistem\s+sebelumnya)/i.test(String(message || ''));
 }
 
+// [v0.9.58] Saat mode sistem TIDAK punya jawaban: jangan diam-diam pakai AI. Kalau kuota AI
+// bersama penuh → minta maaf + tombol Hubungi Guru; kalau masih ada → kartu konfirmasi
+// (needs_ai_confirm) supaya siswa memilih dialihkan ke AI atau tidak.
+async function buildAiConfirmOrExhausted({ sessionId, effectiveMessage, detectedIntent, responseMode, studentName, aiUsage, safetyState }) {
+  const g = aiRateLimitService.getGlobalUsage();
+  if (g.exhausted) {
+    const mins = Math.max(1, Math.ceil((g.resets_in_seconds || 0) / 60));
+    const text = addStudentGreeting(`Maaf, jawaban untuk pertanyaan ini belum tersedia di sistem, dan **kuota AI bersama sedang penuh** (coba lagi sekitar ${mins} menit lagi). Kalau mendesak, kamu bisa menghubungi guru.`, studentName);
+    const actions = [{ type: 'wa_teacher', label: 'Hubungi Guru (WhatsApp)' }];
+    await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
+    await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: detectedIntent, context_used: { response_source: 'system', actions, used_model: 'ai_exhausted' } });
+    return { intent: detectedIntent, response_source: 'system', ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions } };
+  }
+  const confirmText = addStudentGreeting('Aku belum punya **jawaban dari sistem** yang pas untuk pertanyaan ini.\n\nMau aku alihkan ke **Jawaban AI**?', studentName);
+  const confirmActions = [
+    { type: 'confirm_ai', label: 'Ya, alihkan ke AI', payload: { message: effectiveMessage, intent: detectedIntent, responseMode: responseMode === 'system' ? 'short' : (responseMode || 'short') } },
+    { type: 'decline_ai', label: 'Tidak' }
+  ];
+  return {
+    intent: detectedIntent, response_source: 'system', needs_ai_confirm: true,
+    ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings,
+    botMessage: { message: confirmText, actions: confirmActions }
+  };
+}
+
 // FUNGSI UTAMA
 
 const chatService = {
@@ -3150,6 +3175,11 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
     // Mode Jawaban Sistem untuk pertanyaan materi: jangan langsung masuk AI.
     // Tampilkan ringkasan referensi + tombol Lihat materi. Kalau tidak ada, beri arahan yang jelas.
     if (responseMode === 'system' && !forceAI && shouldForceMaterialRetrieval && !LMS_INTENTS.includes(detectedIntent)) {
+      // Tak ada materi cocok → jangan diam-diam pakai AI: minta konfirmasi dulu.
+      if (retrievalResults.length === 0) {
+        return await buildAiConfirmOrExhausted({ sessionId, effectiveMessage, detectedIntent, responseMode, studentName, aiUsage, safetyState });
+      }
+
       const sourceActions = buildSourceActionsFromRetrieval(retrievalResults, retrievalQuery);
       let systemText = '';
 
@@ -3173,8 +3203,6 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
             last_material_title: first.title || first.topic || ''
           }
         }).catch(() => {});
-      } else {
-        systemText = buildNoMaterialFoundResponse(retrievalQuery || effectiveMessage);
       }
 
       // sys#6: tawarkan penjelasan AI dengan membawa pertanyaan ASLI user.
@@ -3262,6 +3290,23 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
         }
       } catch (e) {
         console.warn('[Cache] gagal membaca cache:', e.message);
+      }
+    }
+
+    // [v0.9.58] Mode SISTEM tanpa jawaban deterministik/cache → jangan diam-diam pakai AI:
+    // tampilkan kartu konfirmasi (atau maaf+Hubungi Guru bila kuota AI penuh).
+    if (!forceAI) {
+      return await buildAiConfirmOrExhausted({ sessionId, effectiveMessage, detectedIntent, responseMode, studentName, aiUsage, safetyState });
+    }
+    // forceAI tapi kuota AI bersama penuh → tolak dengan pesan + info reset.
+    {
+      const g = aiRateLimitService.getGlobalUsage();
+      if (g.exhausted) {
+        const mins = Math.max(1, Math.ceil((g.resets_in_seconds || 0) / 60));
+        const text = addStudentGreeting(`Maaf, **kuota AI bersama sedang penuh**. Coba lagi sekitar ${mins} menit lagi, atau pakai Jawaban Sistem dulu ya.`, studentName);
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
+        await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: detectedIntent, context_used: { response_source: 'system', actions: [], used_model: 'ai_exhausted' } });
+        return { intent: detectedIntent, response_source: 'system', ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions: [] } };
       }
     }
 
