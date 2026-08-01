@@ -590,7 +590,9 @@ const chatController = {
 
     let sections = [];
     try {
-      sections = await moodleService.getCourseContents(projectId, courseId);
+      // [v0.9.68] Di-cache: modal Komplain & Komplain Nilai memanggil endpoint ini tiap dibuka.
+      sections = await moodleService.cached(`contents:${projectId}:${courseId}`,
+        () => moodleService.getCourseContents(projectId, courseId));
     } catch (e) {
       console.warn('[SessionActivities] getCourseContents gagal:', e.message);
       return response.success(res, 'Gagal memuat aktivitas dari Moodle', empty, 200);
@@ -601,7 +603,8 @@ const chatController = {
     const completionByCmid = new Map();
     if (_uid.userId) {
       try {
-        const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, _uid.userId);
+        const compRes = await moodleService.cached(`completion:${projectId}:${courseId}:${_uid.userId}`,
+          () => moodleService.getActivitiesCompletionStatus(projectId, courseId, _uid.userId));
         (Array.isArray(compRes?.statuses) ? compRes.statuses : []).forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
       } catch (e) { console.warn('[SessionActivities] completion gagal:', e.message); }
     }
@@ -663,6 +666,46 @@ const chatController = {
     if (!courseId || !userId) return fail('no_context');
 
     const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const clean = (s) => String(s == null ? '' : s).replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+
+    // [v0.9.68] SUMBER UTAMA: gradebook Moodle (gradereport_user_get_grade_items).
+    // Dulu nilai ditebak lewat mod_assign/mod_quiz — sering balik "not_found" karena
+    // WS itu hanya mengembalikan aktivitas yang bisa diakses token. Gradebook memuat
+    // semua item + nilai terformat sekaligus, jadi lebih akurat & cukup 1 panggilan.
+    try {
+      const gradeRes = await moodleService.getUserGradeItems(projectId, courseId, userId);
+      const items = (gradeRes?.usergrades || []).flatMap((u) => (u.gradeitems || []));
+      const wantQuiz = /kuis|quiz/i.test(type);
+      const wanted = norm(title);
+      const pool = items.filter((it) => String(it.itemmodule || '') === (wantQuiz ? 'quiz' : 'assign'));
+      const matchIn = (list) => list.find((it) => norm(it.itemname) === wanted)
+        || list.find((it) => wanted && norm(it.itemname).includes(wanted))
+        || list.find((it) => norm(it.itemname) && wanted.includes(norm(it.itemname)));
+      const item = matchIn(pool) || matchIn(items);
+
+      console.log('[ItemGrade] gradebook:', JSON.stringify({
+        courseId, userId, type, title, items: items.length, pool: pool.length, matched: item?.itemname || null
+      }));
+
+      if (item) {
+        const shown = clean(item.gradeformatted);
+        const hasGrade = (item.graderaw != null && item.graderaw !== '') || (shown && !/^-+$/.test(shown));
+        return response.success(res, 'grade', {
+          graded: Boolean(hasGrade),
+          grade: hasGrade ? (shown || String(item.graderaw)) : null,
+          maxgrade: item.grademax != null ? clean(String(item.grademax)).replace(/\.00$/, '') : null,
+          percent: clean(item.percentageformatted).replace(/^-+$/, '') || null,
+          feedback: clean(item.feedback) || null,
+          title: item.itemname || title,
+          reason: hasGrade ? null : 'not_graded'
+        }, 200);
+      }
+    } catch (e) {
+      // WS gradebook belum diizinkan admin → jatuh ke cara lama di bawah.
+      console.warn('[ItemGrade] gradebook gagal:', e.message);
+    }
+
+    // FALLBACK (kalau gradereport_user_get_grade_items belum diaktifkan di token Moodle).
     try {
       if (/kuis|quiz/i.test(type)) {
         const data = await moodleService.getQuizzes(projectId, [courseId]);

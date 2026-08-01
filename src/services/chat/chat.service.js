@@ -2533,7 +2533,11 @@ const chatService = {
     // [v0.9.65] Intent "meta" yang confidence-nya tinggi dari rule-based JANGAN ditimpa oleh
     // override sidebar/LMS-status/materi — mis. keluhan "kok nilai kecil padahal udah ngerjain
     // tugas" jangan dibelokkan ke tabel "cek tugas" hanya karena ada kata "ngerjain tugas".
-    const PROTECTED_INTENTS = ['komplain', 'small_talk', 'fitur_tidak_didukung', 'rekomendasi_materi', 'klarifikasi', 'greeting', 'daftar_materi', 'bantuan_burnout', 'hubungi_guru', 'out_of_context', 'detail_tugas', 'detail_kuis'];
+    // [v0.9.68] Intent KELUARGA KOMPLAIN ikut dilindungi. Kalimat komplain hampir selalu
+    // memuat "menurut materi / salahnya di mana" sehingga dulu ditimpa jadi penjelasan_materi
+    // (siswa mengeluh soal tugas, malah dibalas ringkasan materi).
+    const PROTECTED_INTENTS = ['komplain', 'small_talk', 'fitur_tidak_didukung', 'rekomendasi_materi', 'klarifikasi', 'greeting', 'daftar_materi', 'bantuan_burnout', 'hubungi_guru', 'out_of_context', 'detail_tugas', 'detail_kuis',
+      'sengketa_jawaban', 'evaluasi_jawaban_tugas', 'cek_status_tugas', 'cek_status_completion'];
 
     const manualMappedIntent = !intent ? inferManualSidebarIntent(effectiveMessage) : '';
     if (!forceAI && manualMappedIntent && !PROTECTED_INTENTS.includes(detectedIntent)) {
@@ -2931,7 +2935,11 @@ const chatService = {
 
       let msgText;
       let evalSource = 'system';
-      const aiAvail = !(aiUsage.cooldown_active || aiUsage.limit_reached || aiUsage.canUseAI === false);
+      // [FIX v0.9.68] Pakai variabel LOKAL. Sebelumnya blok ini membaca `aiUsage` yang baru
+      // dideklarasikan (`let`) jauh di bawah → TDZ: "Cannot access 'aiUsage' before initialization"
+      // tiap komplain tugas "jawaban dianggap salah" dikirim dari form.
+      let evalUsage = aiRateLimitService.getStatus(sessionId);
+      const aiAvail = !(evalUsage.cooldown_active || evalUsage.limit_reached || evalUsage.canUseAI === false);
 
       if (r && r.onlineText && aiAvail) {
         let materiText = '';
@@ -2951,7 +2959,7 @@ ${materiText || '(materi terkait tidak ditemukan)'}
 Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melenceng dgn membandingkan jawaban siswa vs materi (KUTIP materi, bungkus **tebal**), lalu beri arahan perbaikan yang ramah. Kalau ternyata jawaban siswa sebenarnya sudah sesuai materi, katakan begitu & sarankan konfirmasi ke guru.`;
         try {
           const g = await aiQueueService.add(() => geminiService.generateWithFallback(prompt), { intent: 'evaluasi_jawaban_tugas', responseMode: 'detail' });
-          if (g.ok) { msgText = addStudentGreeting(g.text, studentName); evalSource = 'ai'; aiUsage = aiRateLimitService.consume(sessionId); }
+          if (g.ok) { msgText = addStudentGreeting(g.text, studentName); evalSource = 'ai'; evalUsage = aiRateLimitService.consume(sessionId); }
         } catch (e) { console.warn('[Kasus3] AI:', e.message); }
       }
 
@@ -2963,7 +2971,7 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       const evalActions = (r && r.url) ? [{ type: 'open_url', label: '🔗 Buka tugas di VClass', url: r.url, pageType: 'tugas' }] : [];
       await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'evaluasi_jawaban_tugas' });
       await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: msgText, intent: 'evaluasi_jawaban_tugas', context_used: { response_source: evalSource, used_model: 'evaluasi_jawaban_tugas', actions: evalActions } });
-      return { intent: 'evaluasi_jawaban_tugas', response_source: evalSource, ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: msgText, actions: evalActions } };
+      return { intent: 'evaluasi_jawaban_tugas', response_source: evalSource, ai_usage: evalUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: msgText, actions: evalActions } };
     }
 
     // [v0.9.8] Jika ada mention @materi, JANGAN ambil jalur tutorial statis —

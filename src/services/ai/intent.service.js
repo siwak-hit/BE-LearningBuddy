@@ -64,7 +64,10 @@ function ruleBasedDetect(message = '', elementContext = null) {
     return 'element_question';
   }
 
-  const msg = normalizeText(stripFeedbackPrefix(message));
+  // [v0.9.68] "soal" di bahasa sehari-hari sering berarti "tentang" ("komplain soal tugas 1"),
+  // bukan soal kuis. Ganti dulu supaya tidak dianggap sinyal kuis oleh aturan di bawah.
+  const msg = normalizeText(stripFeedbackPrefix(message))
+    .replace(/\b(komplain|komplen|protes|keberatan|tanya|nanya|bertanya|cerita|bahas|lapor)\s+soal\b/g, '$1 tentang');
 
   // =====================================================
   // DETEKSI LMS CHECK — harus sebelum bantuan/tutorial umum.
@@ -157,7 +160,12 @@ function ruleBasedDetect(message = '', elementContext = null) {
 
   // [v0.9.14] Sengketa jawaban kuis: siswa merasa jawaban/kunci kuis salah padahal
   // menurut materi benar. Ditaruh sebelum bantuan_kuis agar "kuis" tak menangkapnya.
+  // [v0.9.68] Kalau yang disebut jelas TUGAS (tanpa kata kuis/soal/nomor), ini bukan sengketa
+  // kuis — biarkan jatuh ke evaluasi_jawaban_tugas di bawah. Dulu "komplain Tugas X, jawabanku
+  // dianggap salah, menurut materi salahnya di mana" tertangkap di sini lalu salah rute.
+  const aboutTugasOnly = hasAny(msg, [/\btugas\b/]) && !hasAny(msg, [/\b(soal|kuis|quis|quiz|ujian|ulangan|nomor|nomer)\b/]);
   if (
+    !aboutTugasOnly &&
     hasAny(msg, [/\b(soal|kuis|quis|quiz|jawaban|nomor|nomer)\b/]) &&
     hasAny(msg, [/\b(salah|keliru|kurang tepat|tidak sesuai|gak sesuai|nggak sesuai)\b/]) &&
     hasAny(msg, [/\b(padahal|menurut materi|harusnya|seharusnya|sebenarnya|mestinya|sudah benar|udah bener|udah benar)\b/])

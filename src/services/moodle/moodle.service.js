@@ -6,6 +6,20 @@ const MOODLE_RESOLVE_CACHE_TTL_MS = parseInt(process.env.MOODLE_RESOLVE_CACHE_TT
 const MOODLE_RESOLVE_CONCURRENCY = Math.max(1, parseInt(process.env.MOODLE_RESOLVE_CONCURRENCY || '3', 10));
 const studentResolveCache = new Map();
 
+// [v0.9.68] Cache TTL generik untuk panggilan WS yang diulang-ulang oleh UI (daftar
+// aktivitas & nilai di modal Komplain). Tanpa ini, tiap buka modal / pilih item selalu
+// nge-hit Moodle. TTL pendek supaya perubahan di VClass tetap cepat terlihat.
+const MOODLE_WS_CACHE_TTL_MS = parseInt(process.env.MOODLE_WS_CACHE_TTL_MS || '120000', 10);
+const wsCache = new Map(); // key -> { createdAt, value }
+
+async function cachedCall(key, loader) {
+  const hit = wsCache.get(key);
+  if (hit && Date.now() - hit.createdAt < MOODLE_WS_CACHE_TTL_MS) return hit.value;
+  const value = await loader();
+  wsCache.set(key, { createdAt: Date.now(), value });
+  return value;
+}
+
 function readStudentResolveCache(key) {
   const hit = studentResolveCache.get(key);
   if (!hit) return null;
@@ -394,6 +408,23 @@ const moodleService = {
       quizid: quizId,
       userid: userId
     });
+  },
+
+  // [v0.9.68] Bungkus panggilan apa pun dengan cache TTL (lihat MOODLE_WS_CACHE_TTL_MS).
+  cached(key, loader) {
+    return cachedCall(key, loader);
+  },
+
+  // [v0.9.68] NILAI siswa satu course lewat GRADEBOOK Moodle. Satu panggilan mengembalikan
+  // SEMUA item (tugas/kuis/dll) beserta nilai terformat, nilai maks, persen, dan feedback —
+  // jauh lebih andal daripada menebak lewat mod_assign/mod_quiz (yang butuh token ikut
+  // ter-enroll di course). Di-cache karena modal Komplain Nilai memanggilnya berkali-kali.
+  async getUserGradeItems(projectId, courseId, userId) {
+    return cachedCall(`gradeitems:${projectId}:${courseId}:${userId}`, () =>
+      moodleService.callByProjectId(projectId, 'gradereport_user_get_grade_items', {
+        courseid: courseId,
+        userid: userId
+      }));
   },
 
   // [v0.9.14] Review lembar jawaban satu attempt (per-soal: status, html soal+jawaban).
