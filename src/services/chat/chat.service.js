@@ -2564,9 +2564,12 @@ const chatService = {
     const manualMaterialRequest = isManualMaterialRequest(effectiveMessage) || isExplicitMaterialRequest;
 
     // [v0.9.9] Jangan override intent daftar_materi (list materi) jadi penjelasan_materi.
-    // [v0.9.23] Juga HORMATI intent eksplisit (form Komplain kirim cek_status_tugas dll;
-    // pesannya bisa memuat kata "materi" → jangan ditarik ke penjelasan_materi).
-    if (!intent && detectedIntent !== 'daftar_materi' && (manualMaterialRequest || shouldBypassVisualGuideForManualMaterial(effectiveMessage, detectedIntent))) {
+    // [v0.9.23] Juga HORMATI intent eksplisit (form Komplain kirim cek_status_tugas dll).
+    // [v0.9.64] JANGAN timpa intent "meta" (komplain/small_talk/rekomendasi/dll) jadi materi
+    // hanya karena pesannya memuat kata seperti "kenapa/soal/nilai" — mis. keluhan
+    // "kok nilai saya kecil, kenapa ya?" harus tetap komplain, bukan pencarian materi.
+    const NON_OVERRIDABLE_INTENTS = ['daftar_materi', 'komplain', 'small_talk', 'fitur_tidak_didukung', 'rekomendasi_materi', 'klarifikasi', 'greeting', 'hubungi_guru', 'bantuan_burnout', 'out_of_context'];
+    if (!intent && !NON_OVERRIDABLE_INTENTS.includes(detectedIntent) && (manualMaterialRequest || shouldBypassVisualGuideForManualMaterial(effectiveMessage, detectedIntent))) {
       detectedIntent = 'penjelasan_materi';
       expectedSourceType = 'document_chunk';
     }
