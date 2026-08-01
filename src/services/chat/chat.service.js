@@ -2251,10 +2251,13 @@ async function buildAiConfirmOrExhausted({ sessionId, effectiveMessage, detected
 // [v0.9.59 #4] DETAIL tugas/kuis: pertanyaan atribut item (tenggat, format, durasi, dll) →
 // konfirmasi item mana (list) lalu jawab dari SISTEM pakai data Moodle. Atribut yang tak
 // tersedia via WS (mis. jumlah soal) diarahkan "cek di VClass". Materi/forum tetap via AI.
-const _ITEM_ATTR_RE = /(deadline|tenggat|berapa soal|jumlah soal|durasi|berapa menit|format|individu|kelompok|instruksi|dinilai|penilaian|kriteria|wajib|ukuran|pdf|word|percobaan|diulang|dibuka|ditutup|tujuan|syarat|unggah|upload|isi tugas|isi kuis|isi quiz|maksimal|nilai maks|dikumpul)/i;
+// [v0.9.66] Pakai \b agar kata pendek tak salah cocok — mis. "word" JANGAN cocok "WordPress".
+const _ITEM_ATTR_RE = /\b(deadline|tenggat|berapa soal|jumlah soal|durasi|berapa menit|format|individu|kelompok|instruksi|dinilai|penilaian|kriteria|wajib|ukuran|pdf|word|percobaan|diulang|dibuka|ditutup|tujuan|syarat|unggah|upload|isi tugas|isi kuis|isi quiz|maksimal|nilai maks|dikumpul)\b/i;
 function detectTugasKuisDetailQuestion(message = '') {
   const t = String(message || '').toLowerCase();
   if (/\bcara\b/.test(t)) return null; // "cara mengumpulkan…" → tutorial, bukan detail
+  // Keluhan/komplain BUKAN pertanyaan detail item → biarkan ditangani intent komplain.
+  if (/\b(komplain|komplen|protes|keberatan|mengeluh|keluhan|kecewa|dianggap salah|salahnya di ?mana|tidak adil|gak adil)\b/.test(t)) return null;
   const isAssign = /\b(tugas|assignment|assign)\b/.test(t);
   const isQuiz = /\b(kuis|quiz|quis|ujian)\b/.test(t);
   if (!isAssign && !isQuiz) return null;
