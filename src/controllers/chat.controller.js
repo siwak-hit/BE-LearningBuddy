@@ -707,20 +707,41 @@ const chatController = {
 
       const ss = await moodleService.getAssignmentSubmissionStatus(projectId, assign.id, userId);
       const fb = ss?.feedback || {};
+      const la = ss?.lastattempt || {};
+      const sub = la.submission || la.teamsubmission || {};
+      const subStatus = String(sub.status || '');          // new | draft | submitted | reopened
+      const gradingStatus = String(la.gradingstatus || ''); // graded | notgraded | ...
       const shown = clean(fb.gradefordisplay != null ? fb.gradefordisplay : (fb.grade && fb.grade.grade));
       const hasGrade = Boolean(shown) && !/^-+$/.test(shown) && shown.toLowerCase() !== 'null';
       // Komentar/feedback guru (plugin editor) → ditampilkan di modal.
       let fbText = '';
       (fb.plugins || []).forEach((p) => { (p.editorfields || []).forEach((ef) => { if (ef.text) fbText += ' ' + clean(ef.text); }); });
       const dispMax = Number(assign.grade) > 0 ? gradeUtil.fmtNum(assign.grade) : null;
+      console.log('[ItemGrade] assign-status:', JSON.stringify({ name: assign.name, subStatus, gradingStatus, hasGrade, shown }));
+
+      if (hasGrade) {
+        return response.success(res, 'grade', {
+          graded: true,
+          grade: shown,
+          // gradefordisplay kadang sudah "80 / 100" → jangan tempel maks lagi.
+          maxgrade: !/\//.test(shown) ? dispMax : null,
+          feedback: clean(fbText) || null,
+          title: assign.name
+        }, 200);
+      }
+
+      // [v0.9.70] Tugas belum bernilai → tampilkan STATUS PENGAJUAN (usulan user): tugas
+      // "Belum dinilai" tetap punya info berguna (sudah terkirim / masih draft / belum kumpul).
+      const submitted = subStatus === 'submitted' || subStatus === 'reopened';
       return response.success(res, 'grade', {
-        graded: hasGrade,
-        grade: hasGrade ? shown : null,
-        // gradefordisplay kadang sudah "80 / 100" → jangan tempel maks lagi.
-        maxgrade: hasGrade && !/\//.test(shown) ? dispMax : null,
+        graded: false,
+        grade: null,
+        reason: submitted ? 'not_graded' : 'not_submitted',
+        submitted,
+        submission_status: subStatus || null,
+        grading_status: gradingStatus || null,
         feedback: clean(fbText) || null,
-        title: assign.name,
-        reason: hasGrade ? null : 'not_graded'
+        title: assign.name
       }, 200);
     } catch (e) {
       console.warn('[ItemGrade] gagal:', e.message);
