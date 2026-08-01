@@ -19,6 +19,7 @@ const documentModel = require('../../models/document.model');
 const aiQueueService = require('../ai/aiQueue.service');
 const lmsContextService = require('../moodle/lms-context.service');
 const moodleService = require('../moodle/moodle.service');
+const moodleConfigModel = require('../../models/moodleConfig.model');
 
 function safeParseObject(value, fallback = {}) {
   if (!value) return fallback;
@@ -121,17 +122,23 @@ function getStoredMaterialQuery(pageContextState = {}, sessionMeta = {}) {
   return pageContextState.last_material_query || sessionMeta.last_material_query || '';
 }
 
-function buildNoMaterialFoundResponse(message = '') {
-  const query = String(message || '').trim();
-  return [
-    'Pertanyaan kamu lebih mengarah ke **soal/materi pelajaran**, bukan panduan penggunaan VClass.',
-    '',
-    query ? `Aku sudah coba mencari materi yang paling dekat dengan: **${escapeHtml(query)}**.` : 'Aku sudah coba mencari materi yang paling dekat dari pertanyaanmu.',
-    'Tapi aku belum menemukan bagian materi yang benar-benar cocok di data VClass.',
-    '',
-    'Coba tulis topiknya lebih spesifik, misalnya: “materi CMS”, “apa itu WordPress”, atau “dampak media sosial”.'
-  ].join('\n');
+// [v0.9.59] Sapaan MURNI (semua kata = sapaan/tes): "halo", "hai", "pagi", "tes", "ping".
+// "halo apa itu csm" → false (ada kata non-sapaan) supaya tetap diproses normal.
+const GREETING_WORDS = new Set(['halo', 'hallo', 'helo', 'hello', 'hi', 'hai', 'hay', 'hei', 'hey', 'hy', 'pagi', 'siang', 'sore', 'malam', 'selamat', 'assalamualaikum', 'assalamualaykum', 'assalamu', 'alaikum', 'test', 'tes', 'testing', 'ping', 'cek', 'check', 'oi', 'woi', 'permisi', 'yo', 'p']);
+function detectGreetingOnly(message = '') {
+  const t = String(message || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > 25) return false;
+  const words = t.split(' ').filter(Boolean);
+  if (!words.length || words.length > 4) return false;
+  return words.every((w) => GREETING_WORDS.has(w));
 }
+const GREETING_REPLIES = [
+  'Halo! 👋 Aku AI Learning Buddy, siap bantu kamu seputar penggunaan VClass. Ada yang bisa kubantu?',
+  'Hai! Senang kamu mampir. Mau tanya cara pakai VClass — login, kumpul tugas, forum, atau kuis? Tanya aja ya.',
+  'Halo juga! Aku di sini buat bantu kamu soal VClass. Ada yang lagi bikin bingung?',
+  'Hai! 😊 Butuh panduan VClass atau mau menanyakan materi? Tinggal ketik pertanyaanmu ya.',
+  'Halo! Ada yang bisa kubantu hari ini? Misalnya cara mengumpulkan tugas atau cek deadline.'
+];
 
 function canonicalizeRetrievalQuery(message = '', fallbackMaterialQuery = '') {
   const text = String(message || '').trim();
@@ -2231,6 +2238,124 @@ async function buildAiConfirmOrExhausted({ sessionId, effectiveMessage, detected
   };
 }
 
+// [v0.9.59 #4] DETAIL tugas/kuis: pertanyaan atribut item (tenggat, format, durasi, dll) →
+// konfirmasi item mana (list) lalu jawab dari SISTEM pakai data Moodle. Atribut yang tak
+// tersedia via WS (mis. jumlah soal) diarahkan "cek di VClass". Materi/forum tetap via AI.
+const _ITEM_ATTR_RE = /(deadline|tenggat|berapa soal|jumlah soal|durasi|berapa menit|format|individu|kelompok|instruksi|dinilai|penilaian|kriteria|wajib|ukuran|pdf|word|percobaan|diulang|dibuka|ditutup|tujuan|syarat|unggah|upload|isi tugas|isi kuis|isi quiz|maksimal|nilai maks|dikumpul)/i;
+function detectTugasKuisDetailQuestion(message = '') {
+  const t = String(message || '').toLowerCase();
+  if (/\bcara\b/.test(t)) return null; // "cara mengumpulkan…" → tutorial, bukan detail
+  const isAssign = /\b(tugas|assignment|assign)\b/.test(t);
+  const isQuiz = /\b(kuis|quiz|quis|ujian)\b/.test(t);
+  if (!isAssign && !isQuiz) return null;
+  if (!_ITEM_ATTR_RE.test(t)) return null;
+  return isQuiz ? 'quiz' : 'assignment';
+}
+
+function fmtMoodleDate(ts) {
+  const n = Number(ts);
+  if (!n) return 'tidak diatur';
+  try {
+    return new Date(n * 1000).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' WIB';
+  } catch (_) { return 'tidak diatur'; }
+}
+function stripHtmlText(s = '') {
+  return String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+async function fetchTugasKuisItems(projectId, courseId, itemType) {
+  if (itemType === 'quiz') {
+    const data = await moodleService.getQuizzes(projectId, [courseId]);
+    return (data?.quizzes || []).filter((q) => String(q.course) === String(courseId));
+  }
+  const data = await moodleService.getAssignments(projectId, [courseId]);
+  const list = [];
+  (data?.courses || []).forEach((c) => { if (String(c.id) === String(courseId)) (c.assignments || []).forEach((a) => list.push(a)); });
+  return list;
+}
+function findItemByText(items, text) {
+  const t = String(text || '').toLowerCase();
+  let best = null;
+  for (const it of items) {
+    const name = String(it.name || '').toLowerCase().trim();
+    if (name && t.includes(name) && (!best || name.length > String(best.name || '').length)) best = it;
+  }
+  return best;
+}
+function buildAssignmentInfoText(a, studentName) {
+  const lines = [`Hai **${studentName}**, ini info tugas **${escapeHtml(a.name || 'Tugas')}**:`, ''];
+  const intro = stripHtmlText(a.intro);
+  if (intro) lines.push(`📝 ${intro.slice(0, 400)}`, '');
+  lines.push(`• **Tenggat:** ${fmtMoodleDate(a.duedate || a.cutoffdate)}`);
+  lines.push(`• **Pengerjaan:** ${Number(a.teamsubmission) ? 'kelompok' : 'individu'}`);
+  if (a.grade != null && Number(a.grade)) lines.push(`• **Dinilai:** ya (nilai maksimal ${a.grade})`);
+  lines.push('', '_Detail lain yang tak tercantum (mis. jumlah/isi soal, format & ukuran file) bisa kamu cek langsung di VClass ya._');
+  return lines.join('\n');
+}
+function buildQuizInfoText(q, studentName) {
+  const lines = [`Hai **${studentName}**, ini info kuis **${escapeHtml(q.name || 'Kuis')}**:`, ''];
+  const intro = stripHtmlText(q.intro);
+  if (intro) lines.push(`📝 ${intro.slice(0, 400)}`, '');
+  if (q.timeopen) lines.push(`• **Dibuka:** ${fmtMoodleDate(q.timeopen)}`);
+  if (q.timeclose) lines.push(`• **Ditutup:** ${fmtMoodleDate(q.timeclose)}`);
+  lines.push(`• **Durasi:** ${Number(q.timelimit) ? Math.round(Number(q.timelimit) / 60) + ' menit' : 'tanpa batas waktu'}`);
+  lines.push(`• **Percobaan diizinkan:** ${Number(q.attempts) ? q.attempts + ' kali' : 'tak terbatas'}`);
+  if (q.grade != null) lines.push(`• **Nilai maksimal:** ${q.grade}`);
+  lines.push('', '_Jumlah/isi soal dan detail lain yang tak tercantum bisa kamu cek langsung di VClass._');
+  return lines.join('\n');
+}
+async function respondTugasKuisDetail({ sessionId, projectId, courseId, itemType, questionText, studentName, safetyState }) {
+  const isQuiz = itemType === 'quiz';
+  const detailIntent = isQuiz ? 'detail_kuis' : 'detail_tugas';
+  const label = isQuiz ? 'kuis' : 'tugas';
+  const wrap = (text, actions = []) => ({
+    intent: detailIntent, response_source: 'system',
+    ai_usage: aiRateLimitService.getStatus(sessionId),
+    is_locked: safetyState.locked, warnings: safetyState.warnings,
+    botMessage: { message: text, actions }
+  });
+
+  if (!courseId) {
+    return wrap(`Aku belum tahu ${label} di kelas mana yang kamu maksud. Buka halaman course/kelasmu di VClass dulu ya, lalu tanya lagi.`);
+  }
+
+  let items = [];
+  try { items = await fetchTugasKuisItems(projectId, courseId, itemType); }
+  catch (e) {
+    console.warn('[TugasKuisDetail] gagal ambil dari Moodle:', e.message);
+    return wrap(`Maaf, aku sedang tidak bisa mengambil daftar ${label} dari VClass. Coba lagi nanti atau buka langsung di VClass ya.`);
+  }
+  if (!items.length) return wrap(`Belum ada ${label} yang terdaftar di kelas ini menurut data VClass.`);
+
+  const matched = findItemByText(items, questionText);
+
+  // 1 item ATAU nama cocok jelas → jawab langsung dari sistem.
+  if (matched || items.length === 1) {
+    const item = matched || items[0];
+    const text = isQuiz ? buildQuizInfoText(item, studentName) : buildAssignmentInfoText(item, studentName);
+    let baseUrl = '';
+    try { const cfg = await moodleConfigModel.findByProjectId(projectId); baseUrl = String(cfg?.rest_endpoint || '').replace(/\/webservice\/.*$/, ''); } catch (_) {}
+    const cmid = isQuiz ? item.coursemodule : item.cmid;
+    const actions = [];
+    if (baseUrl && cmid) actions.push({ type: 'open_url', label: 'Lihat di VClass', url: `${baseUrl}/mod/${isQuiz ? 'quiz' : 'assign'}/view.php?id=${cmid}` });
+    actions.push({
+      type: 'pick_intent',
+      label: isQuiz ? 'Cek kuis ini sudah dikerjakan?' : 'Cek tugas ini sudah dikumpulkan?',
+      intent: isQuiz ? 'cek_quiz_belum_dikerjakan' : 'cek_tugas_belum_selesai',
+      prompt: isQuiz ? 'Kuis apa yang belum saya kerjakan?' : 'Tugas apa yang belum saya selesaikan?'
+    });
+    await chatModel.createMessage({ session_id: sessionId, role: 'user', message: questionText, intent: detailIntent });
+    await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: detailIntent, context_used: { response_source: 'system', actions, used_model: 'lms_item_detail' } });
+    return wrap(text, actions);
+  }
+
+  // Ambigu → tampilkan LIST untuk dipilih (tombol pick_intent → kirim ulang nama item).
+  const actions = items.slice(0, 8).map((it) => ({ type: 'pick_intent', label: it.name || `(${label})`, intent: detailIntent, prompt: it.name || '' }));
+  const text = `${isQuiz ? 'Kuis' : 'Tugas'} yang mana yang kamu maksud? Pilih salah satu di bawah ini ya:`;
+  await chatModel.createMessage({ session_id: sessionId, role: 'user', message: questionText, intent: detailIntent });
+  await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: detailIntent, context_used: { response_source: 'system', actions, used_model: 'lms_item_disambiguation' } });
+  return wrap(text, actions);
+}
+
 // FUNGSI UTAMA
 
 const chatService = {
@@ -2328,6 +2453,34 @@ const chatService = {
     }
 
     const effectiveMessage = forceAI ? cleanFeedbackPrompt(message) : message;
+
+    // [v0.9.59] Sapaan murni ("halo"/"hai"/"tes") → jawab SISTEM, sapa balik (variatif),
+    // jangan sampai jatuh ke kartu konfirmasi AI.
+    if (!mention && !elementContext && detectGreetingOnly(effectiveMessage)) {
+      const text = GREETING_REPLIES[Math.floor(Math.random() * GREETING_REPLIES.length)];
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'greeting' });
+      await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'greeting', context_used: { response_source: 'system', actions: [], used_model: 'greeting' } });
+      return {
+        intent: 'greeting', response_source: 'system',
+        ai_usage: aiRateLimitService.getStatus(sessionId),
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        botMessage: { message: text, actions: [] }
+      };
+    }
+
+    // [v0.9.59 #4] Pertanyaan DETAIL tugas/kuis → konfirmasi item (list) lalu jawab dari SISTEM.
+    // Pick eksplisit datang sebagai intent detail_tugas/detail_kuis (dari tombol pilihan).
+    if (!mention && !elementContext) {
+      if (intent === 'detail_tugas' || intent === 'detail_kuis') {
+        return await respondTugasKuisDetail({ sessionId, projectId, courseId: fallbackCourseId, itemType: intent === 'detail_kuis' ? 'quiz' : 'assignment', questionText: effectiveMessage, studentName, safetyState });
+      }
+      if (!forceAI) {
+        const itemType = detectTugasKuisDetailQuestion(effectiveMessage);
+        if (itemType) {
+          return await respondTugasKuisDetail({ sessionId, projectId, courseId: fallbackCourseId, itemType, questionText: effectiveMessage, studentName, safetyState });
+        }
+      }
+    }
 
     // [v0.9.24] DISAMBIGUASI: kalau pertanyaan AMBIGU (mis. "hari senin ngerjain apa aja"),
     // jangan paksa tebak intent — tawarkan maks 4 pilihan dulu. Saat siswa klik salah satu,
