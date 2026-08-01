@@ -19,7 +19,6 @@ const documentModel = require('../../models/document.model');
 const aiQueueService = require('../ai/aiQueue.service');
 const lmsContextService = require('../moodle/lms-context.service');
 const moodleService = require('../moodle/moodle.service');
-const moodleConfigModel = require('../../models/moodleConfig.model');
 
 function safeParseObject(value, fallback = {}) {
   if (!value) return fallback;
@@ -2252,61 +2251,47 @@ function detectTugasKuisDetailQuestion(message = '') {
   return isQuiz ? 'quiz' : 'assignment';
 }
 
-function fmtMoodleDate(ts) {
-  const n = Number(ts);
-  if (!n) return 'tidak diatur';
+function fmtDeadline(d) {
+  if (!d) return 'tidak diatur';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return String(d);
   try {
-    return new Date(n * 1000).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' WIB';
-  } catch (_) { return 'tidak diatur'; }
+    return dt.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' WIB';
+  } catch (_) { return String(d); }
 }
-function stripHtmlText(s = '') {
-  return String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-}
-async function fetchTugasKuisItems(projectId, courseId, itemType) {
-  if (itemType === 'quiz') {
-    const data = await moodleService.getQuizzes(projectId, [courseId]);
-    return (data?.quizzes || []).filter((q) => String(q.course) === String(courseId));
-  }
-  const data = await moodleService.getAssignments(projectId, [courseId]);
-  const list = [];
-  (data?.courses || []).forEach((c) => { if (String(c.id) === String(courseId)) (c.assignments || []).forEach((a) => list.push(a)); });
-  return list;
-}
-function findItemByText(items, text) {
+function findActivityByText(items, text) {
   const t = String(text || '').toLowerCase();
   let best = null;
   for (const it of items) {
-    const name = String(it.name || '').toLowerCase().trim();
-    if (name && t.includes(name) && (!best || name.length > String(best.name || '').length)) best = it;
+    const name = String(it.title || '').toLowerCase().trim();
+    if (name && t.includes(name) && (!best || name.length > String(best.title || '').length)) best = it;
   }
   return best;
 }
-function buildAssignmentInfoText(a, studentName) {
-  const lines = [`Hai **${studentName}**, ini info tugas **${escapeHtml(a.name || 'Tugas')}**:`, ''];
-  const intro = stripHtmlText(a.intro);
-  if (intro) lines.push(`📝 ${intro.slice(0, 400)}`, '');
-  lines.push(`• **Tenggat:** ${fmtMoodleDate(a.duedate || a.cutoffdate)}`);
-  lines.push(`• **Pengerjaan:** ${Number(a.teamsubmission) ? 'kelompok' : 'individu'}`);
-  if (a.grade != null && Number(a.grade)) lines.push(`• **Dinilai:** ya (nilai maksimal ${a.grade})`);
-  lines.push('', '_Detail lain yang tak tercantum (mis. jumlah/isi soal, format & ukuran file) bisa kamu cek langsung di VClass ya._');
+function buildActivityDetailCard(a, studentName, isQuiz) {
+  const lines = [`Hai **${studentName}**, ini info ${isQuiz ? 'kuis' : 'tugas'} **${escapeHtml(a.title || '')}**:`, ''];
+  if (a.description) lines.push(`📝 ${String(a.description).slice(0, 400)}`, '');
+  lines.push(`• **Tenggat:** ${fmtDeadline(a.deadline)}`);
+  if (a.status && a.status !== 'Belum diketahui') lines.push(`• **Status kamu:** ${a.status}`);
+  lines.push('', `_Detail lain seperti jumlah soal${isQuiz ? ', durasi, jumlah percobaan' : ', format & ukuran file'} bisa kamu cek langsung di VClass ya._`);
   return lines.join('\n');
 }
-function buildQuizInfoText(q, studentName) {
-  const lines = [`Hai **${studentName}**, ini info kuis **${escapeHtml(q.name || 'Kuis')}**:`, ''];
-  const intro = stripHtmlText(q.intro);
-  if (intro) lines.push(`📝 ${intro.slice(0, 400)}`, '');
-  if (q.timeopen) lines.push(`• **Dibuka:** ${fmtMoodleDate(q.timeopen)}`);
-  if (q.timeclose) lines.push(`• **Ditutup:** ${fmtMoodleDate(q.timeclose)}`);
-  lines.push(`• **Durasi:** ${Number(q.timelimit) ? Math.round(Number(q.timelimit) / 60) + ' menit' : 'tanpa batas waktu'}`);
-  lines.push(`• **Percobaan diizinkan:** ${Number(q.attempts) ? q.attempts + ' kali' : 'tak terbatas'}`);
-  if (q.grade != null) lines.push(`• **Nilai maksimal:** ${q.grade}`);
-  lines.push('', '_Jumlah/isi soal dan detail lain yang tak tercantum bisa kamu cek langsung di VClass._');
-  return lines.join('\n');
+// Ambil aktivitas dari jalur PROVEN (buildChatLmsContext) → assign/quiz/materi/forum
+// dengan judul, deskripsi, tenggat, status, URL yang sudah dinormalisasi.
+async function loadLmsActivities(opts) {
+  const { projectId, sessionId, classCode, studentName, moodleUserId, studentEmail, courseId, enrolledCourses, pageActivities, intent } = opts;
+  const ctx = await lmsContextService.buildChatLmsContext({
+    projectId, sessionId, classCode, studentName, moodleUserId, studentEmail,
+    courseId, enrolledCourses, pageActivities, intent
+  });
+  return Array.isArray(ctx?.activities) ? ctx.activities : [];
 }
-async function respondTugasKuisDetail({ sessionId, projectId, courseId, itemType, questionText, studentName, safetyState }) {
+async function respondTugasKuisDetail(opts) {
+  const { sessionId, itemType, questionText, studentName, safetyState } = opts;
   const isQuiz = itemType === 'quiz';
   const detailIntent = isQuiz ? 'detail_kuis' : 'detail_tugas';
   const label = isQuiz ? 'kuis' : 'tugas';
+  const wantType = isQuiz ? 'quiz' : 'assign';
   const wrap = (text, actions = []) => ({
     intent: detailIntent, response_source: 'system',
     ai_usage: aiRateLimitService.getStatus(sessionId),
@@ -2314,29 +2299,25 @@ async function respondTugasKuisDetail({ sessionId, projectId, courseId, itemType
     botMessage: { message: text, actions }
   });
 
-  if (!courseId) {
-    return wrap(`Aku belum tahu ${label} di kelas mana yang kamu maksud. Buka halaman course/kelasmu di VClass dulu ya, lalu tanya lagi.`);
-  }
-
   let items = [];
-  try { items = await fetchTugasKuisItems(projectId, courseId, itemType); }
-  catch (e) {
-    console.warn('[TugasKuisDetail] gagal ambil dari Moodle:', e.message);
+  try {
+    const acts = await loadLmsActivities({ ...opts, intent: isQuiz ? 'cek_quiz_belum_dikerjakan' : 'cek_tugas_belum_selesai' });
+    items = acts.filter((a) => a.type === wantType);
+  } catch (e) {
+    console.warn('[TugasKuisDetail] buildChatLmsContext gagal:', e.message);
     return wrap(`Maaf, aku sedang tidak bisa mengambil daftar ${label} dari VClass. Coba lagi nanti atau buka langsung di VClass ya.`);
   }
   if (!items.length) return wrap(`Belum ada ${label} yang terdaftar di kelas ini menurut data VClass.`);
 
-  const matched = findItemByText(items, questionText);
+  const matched = findActivityByText(items, questionText);
 
   // 1 item ATAU nama cocok jelas → jawab langsung dari sistem.
   if (matched || items.length === 1) {
     const item = matched || items[0];
-    const text = isQuiz ? buildQuizInfoText(item, studentName) : buildAssignmentInfoText(item, studentName);
-    let baseUrl = '';
-    try { const cfg = await moodleConfigModel.findByProjectId(projectId); baseUrl = String(cfg?.rest_endpoint || '').replace(/\/webservice\/.*$/, ''); } catch (_) {}
-    const cmid = isQuiz ? item.coursemodule : item.cmid;
+    const text = buildActivityDetailCard(item, studentName, isQuiz);
+    const url = item.action_url || item.url || item.course_url;
     const actions = [];
-    if (baseUrl && cmid) actions.push({ type: 'open_url', label: 'Lihat di VClass', url: `${baseUrl}/mod/${isQuiz ? 'quiz' : 'assign'}/view.php?id=${cmid}` });
+    if (url) actions.push({ type: 'open_url', label: 'Lihat di VClass', url });
     actions.push({
       type: 'pick_intent',
       label: isQuiz ? 'Cek kuis ini sudah dikerjakan?' : 'Cek tugas ini sudah dikumpulkan?',
@@ -2348,8 +2329,8 @@ async function respondTugasKuisDetail({ sessionId, projectId, courseId, itemType
     return wrap(text, actions);
   }
 
-  // Ambigu → tampilkan LIST untuk dipilih (tombol pick_intent → kirim ulang nama item).
-  const actions = items.slice(0, 8).map((it) => ({ type: 'pick_intent', label: it.name || `(${label})`, intent: detailIntent, prompt: it.name || '' }));
+  // Ambigu → tampilkan LIST untuk dipilih (tombol pick_intent → kirim ulang judul item).
+  const actions = items.slice(0, 8).map((it) => ({ type: 'pick_intent', label: it.title || `(${label})`, intent: detailIntent, prompt: it.title || '' }));
   const text = `${isQuiz ? 'Kuis' : 'Tugas'} yang mana yang kamu maksud? Pilih salah satu di bawah ini ya:`;
   await chatModel.createMessage({ session_id: sessionId, role: 'user', message: questionText, intent: detailIntent });
   await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: detailIntent, context_used: { response_source: 'system', actions, used_model: 'lms_item_disambiguation' } });
@@ -2471,13 +2452,17 @@ const chatService = {
     // [v0.9.59 #4] Pertanyaan DETAIL tugas/kuis → konfirmasi item (list) lalu jawab dari SISTEM.
     // Pick eksplisit datang sebagai intent detail_tugas/detail_kuis (dari tombol pilihan).
     if (!mention && !elementContext) {
+      const lmsDetailOpts = {
+        sessionId, projectId, classCode, studentName, moodleUserId, studentEmail,
+        courseId: fallbackCourseId, enrolledCourses, pageActivities, questionText: effectiveMessage, safetyState
+      };
       if (intent === 'detail_tugas' || intent === 'detail_kuis') {
-        return await respondTugasKuisDetail({ sessionId, projectId, courseId: fallbackCourseId, itemType: intent === 'detail_kuis' ? 'quiz' : 'assignment', questionText: effectiveMessage, studentName, safetyState });
+        return await respondTugasKuisDetail({ ...lmsDetailOpts, itemType: intent === 'detail_kuis' ? 'quiz' : 'assignment' });
       }
       if (!forceAI) {
         const itemType = detectTugasKuisDetailQuestion(effectiveMessage);
         if (itemType) {
-          return await respondTugasKuisDetail({ sessionId, projectId, courseId: fallbackCourseId, itemType, questionText: effectiveMessage, studentName, safetyState });
+          return await respondTugasKuisDetail({ ...lmsDetailOpts, itemType });
         }
       }
     }
@@ -2621,34 +2606,55 @@ const chatService = {
     }
 
     if (detectedIntent === 'daftar_materi') {
-      let materiList = [];
-      try {
-        const docs = await documentModel.findByProjectId(projectId);
-        materiList = (docs || []).filter((d) => d && (d.title || d.topic));
-      } catch (e) { console.warn('[Chat] Gagal ambil daftar materi:', e.message); }
-
+      // Utamakan data LIVE dari Moodle (materi/page/resource). Fallback ke dokumen tersinkron.
       let daftarMsg;
-      if (!materiList.length) {
-        daftarMsg = `Hai **${studentName}**,\n\nSepertinya belum ada materi yang tersedia untuk kursus ini. Coba tanyakan ke gurumu ya. 🙏`;
-      } else {
-        const lines = materiList.slice(0, 30).map((d, i) => {
-          const title = String(d.title || d.topic || `Materi ${i + 1}`).trim();
-          const topic = (d.topic && String(d.topic).trim() && String(d.topic).trim() !== title) ? ` — _${String(d.topic).trim()}_` : '';
-          return `${i + 1}. **${title}**${topic}`;
+      let actions = [];
+      let moodleMateri = [];
+      try {
+        const acts = await loadLmsActivities({
+          projectId, sessionId, classCode, studentName, moodleUserId, studentEmail,
+          courseId: fallbackCourseId, enrolledCourses, pageActivities, intent: 'daftar_materi'
+        });
+        moodleMateri = acts.filter((a) => a.type === 'materi');
+      } catch (e) { console.warn('[Chat] daftar_materi live gagal:', e.message); }
+
+      if (moodleMateri.length) {
+        const lines = moodleMateri.slice(0, 30).map((a, i) => {
+          const lock = a.status === 'Belum terbuka' ? ' 🔒' : '';
+          return `${i + 1}. **${escapeHtml(a.title)}**${lock}`;
         }).join('\n');
-        daftarMsg = `Hai **${studentName}**,\n\nIni daftar materi yang ada di kursus ini:\n\n${lines}\n\nKamu bisa ketik **@** di kolom chat lalu pilih materinya untuk minta rangkuman, poin penting, atau soal latihan. 😊`;
+        daftarMsg = `Hai **${studentName}**,\n\nIni materi yang ada di kelasmu (dari VClass):\n\n${lines}\n\nKetik **@** di kolom chat lalu pilih materinya untuk minta rangkuman, poin penting, atau soal latihan. 😊`;
+        const firstUrl = moodleMateri[0].course_url || moodleMateri[0].url;
+        if (firstUrl) actions = [{ type: 'open_url', label: 'Buka course di VClass', url: firstUrl }];
+      } else {
+        let materiList = [];
+        try {
+          const docs = await documentModel.findByProjectId(projectId);
+          materiList = (docs || []).filter((d) => d && (d.title || d.topic));
+        } catch (e) { console.warn('[Chat] Gagal ambil daftar materi (fallback):', e.message); }
+
+        if (!materiList.length) {
+          daftarMsg = `Hai **${studentName}**,\n\nSepertinya belum ada materi yang tersedia untuk kelas ini menurut data VClass. Coba buka halaman course-mu di VClass, atau tanyakan ke gurumu ya. 🙏`;
+        } else {
+          const lines = materiList.slice(0, 30).map((d, i) => {
+            const title = String(d.title || d.topic || `Materi ${i + 1}`).trim();
+            const topic = (d.topic && String(d.topic).trim() && String(d.topic).trim() !== title) ? ` — _${String(d.topic).trim()}_` : '';
+            return `${i + 1}. **${title}**${topic}`;
+          }).join('\n');
+          daftarMsg = `Hai **${studentName}**,\n\nIni daftar materi yang ada di kursus ini:\n\n${lines}\n\nKetik **@** di kolom chat lalu pilih materinya untuk minta rangkuman, poin penting, atau soal latihan. 😊`;
+        }
       }
 
       await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'daftar_materi' });
       await chatModel.createMessage({
         session_id: sessionId, role: 'assistant', message: daftarMsg, intent: 'daftar_materi',
-        context_used: { response_source: 'system', used_model: 'daftar_materi', actions: [] }
+        context_used: { response_source: 'system', used_model: 'daftar_materi', actions }
       });
 
       return {
         intent: 'daftar_materi', response_source: 'system', ai_usage: aiRateLimitService.getStatus(sessionId),
         is_locked: safetyState.locked, warnings: safetyState.warnings,
-        botMessage: { message: daftarMsg, actions: [] }
+        botMessage: { message: daftarMsg, actions }
       };
     }
 

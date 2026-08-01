@@ -122,7 +122,11 @@ function ruleBasedDetect(message = '', elementContext = null) {
 
   // [v0.9.9] "Ada materi apa aja / daftar materi" → list materi (BUKAN penjelasan konsep).
   // Diletakkan lebih awal agar tak tertangkap navigasi_kursus / penjelasan_materi.
-  if (hasAny(msg, [/\b(materi apa aja|materi apa saja|ada materi apa|daftar materi|list materi|materi apa yang ada|materi apa di|materi nya apa|materinya apa aja)\b/])) {
+  if (hasAny(msg, [
+    /\b(materi apa aja|materi apa saja|ada materi apa|daftar materi|list materi|materi apa yang ada|materi apa di|materi nya apa|materinya apa aja)\b/,
+    /materi.{0,25}(apa aja|apa saja|apa yang ada|ada apa)/, // "materi minggu ini ada apa aja"
+    /(ada )?(materi|bahan ajar).{0,20}(minggu ini|pekan ini) (apa|ada)/
+  ])) {
     return 'daftar_materi';
   }
 
