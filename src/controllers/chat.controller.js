@@ -167,7 +167,13 @@ const chatController = {
     };
 
     // Pembuatan Display Name Otomatis (Memprioritaskan nama auto-detect dari Moodle)
-    let displayName = `Pengunjung #${shortCode}`;
+    // [v0.9.84] Label pengunjung anonim: "Pengunjung 07" (dua digit stabil per sesi),
+    // bukan kode heksa "#C6F" yang tak terbaca. ponytail: nomor diturunkan dari sessionKey,
+    // jadi stabil tapi tidak dijamin unik lintas sesi — cukup untuk label sapaan.
+    const visitorNo = String(
+      Array.from(sessionKey).reduce((acc, ch) => (acc + ch.charCodeAt(0)) % 100, 0)
+    ).padStart(2, '0');
+    let displayName = `Pengunjung ${visitorNo}`;
     if (autoStudentName) {
       displayName = autoStudentName;
     } else if (studentAlias) {

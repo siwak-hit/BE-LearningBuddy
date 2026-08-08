@@ -3109,7 +3109,25 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       safetyState.warnings += 1;
       if (safetyState.warnings >= 3) safetyState.locked = true;
       await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } });
-      return { intent: detectedIntent, response_source: 'system', botMessage: { message: 'Bahasa tidak pantas terdeteksi.', actions: [] }, is_locked: safetyState.locked, warnings: safetyState.warnings, ai_usage: aiRateLimitService.getStatus(sessionId) };
+
+      // [v0.9.84] Kata kasarnya DISENSOR (mis. "BEGO banget" → "**** banget"). Versi
+      // tersensor inilah yang disimpan ke riwayat & dikirim balik supaya bubble pertanyaan
+      // siswa ikut diganti di layar — kata aslinya tidak pernah tersimpan/tertampil lagi.
+      const censoredMessage = moderationResult.censoredText || effectiveMessage;
+      const warningText = 'Bahasa tidak pantas terdeteksi.';
+      await chatModel.createMessage({ session_id: sessionId, role: 'user', message: censoredMessage, intent: detectedIntent });
+      await chatModel.createMessage({
+        session_id: sessionId, role: 'assistant', message: warningText, intent: detectedIntent,
+        context_used: { response_source: 'system', actions: [], used_model: 'moderation' }
+      });
+
+      return {
+        intent: detectedIntent, response_source: 'system',
+        censored_message: censoredMessage,
+        botMessage: { message: warningText, actions: [] },
+        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        ai_usage: aiRateLimitService.getStatus(sessionId)
+      };
     }
 
     await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });

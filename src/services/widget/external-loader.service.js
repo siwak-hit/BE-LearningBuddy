@@ -364,15 +364,10 @@ const externalLoaderService = {
     // halaman/profil Moodle (same-origin, cookie login ikut) supaya fitur "@materi" di
     // dalam app tak perlu minta email lagi. Kalau tak terbaca, siswa tetap masuk dan baru
     // diminta email saat membuka drawer materi.
-    var EMAIL_CACHE_KEY = 'alb_moodle_email';
-
-    function readCachedEmail() {
-      try { return localStorage.getItem(EMAIL_CACHE_KEY) || ''; } catch (e) { return ''; }
-    }
-
-    function cacheEmail(email) {
-      try { if (email) localStorage.setItem(EMAIL_CACHE_KEY, email); } catch (e) {}
-    }
+    // [v0.9.84] Cache email di localStorage DIHAPUS. Cache itu bertahan setelah browser
+    // ditutup, jadi siswa berikutnya yang memakai perangkat sama bisa terbawa identitas
+    // siswa sebelumnya. Email sekarang selalu dibaca LANGSUNG dari sesi Moodle yang
+    // sedang login (DOM → halaman profil), jadi tak pernah basi.
 
     // Halaman profil Moodle = sumber email paling andal lintas tema. Origin sama dengan
     // halaman ini, jadi cookie sesi ikut terkirim dan tak ada masalah CORS.
@@ -389,8 +384,6 @@ const externalLoaderService = {
 
     function resolveStudentEmail(ctx) {
       if (ctx.email) return Promise.resolve(ctx.email);
-      var cached = readCachedEmail();
-      if (cached) return Promise.resolve(cached);
       return fetchEmailFromProfile(ctx.moodle_user_id);
     }
 
@@ -414,7 +407,7 @@ const externalLoaderService = {
 
       resolveStudentEmail(ctx)
         .then(function(email) {
-          if (email) { ctx.email = email; cacheEmail(email); }
+          if (email) ctx.email = email;
 
           return fetchWithTimeout(apiBase + '/api/chat/session', {
             method: 'POST',

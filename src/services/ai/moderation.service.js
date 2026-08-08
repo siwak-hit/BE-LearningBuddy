@@ -128,12 +128,17 @@ const moderationService = {
     // PRIORITAS 1: Hate Speech
     // =========================
     if (containsAny(normalizedMessage, hateWords)) {
+      // [v0.9.84] Ikut sertakan versi tersensor supaya pesan yang tersimpan & tampil
+      // di chat tidak memuat kata aslinya (sama seperti jalur profanity).
+      const hateHits = hateWords.filter((w) => normalizedMessage.includes(w));
       return {
         isFlagged: true,
         type: 'hate_speech',
         severity: 'critical',
         responseMessage:
-          'Maaf, aku tidak bisa menanggapi pesan yang mengandung unsur kebencian, ancaman, atau SARA. Mari kita fokus ke materi pelajaran ya!'
+          'Maaf, aku tidak bisa menanggapi pesan yang mengandung unsur kebencian, ancaman, atau SARA. Mari kita fokus ke materi pelajaran ya!',
+        censoredText: safeCensor(originalMessage, hateHits),
+        detectedWords: hateHits
       };
     }
 
@@ -275,11 +280,13 @@ function explicitProfanityWords() {
   ];
 }
 
+// [v0.9.84] Jumlah bintang = panjang katanya, jadi "BEGO banget" → "**** banget"
+// (bentuk kalimatnya tetap terbaca, katanya saja yang tertutup).
 function safeCensor(text = '', words = []) {
   let result = String(text || '');
   words.forEach((word) => {
     const re = new RegExp(`\\b${escapeRegex(word)}\\b`, 'gi');
-    result = result.replace(re, '***');
+    result = result.replace(re, (match) => '*'.repeat(match.length));
   });
   return result;
 }
