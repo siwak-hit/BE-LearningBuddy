@@ -2414,7 +2414,12 @@ const chatService = {
     // (mis. 773 padahal 772) → cek status tugas/forum/kuis ikut salah. Kalau ada email,
     // resolve userId dari enrolled users Moodle (cached). Fallback ke id DOM.
     let moodleUserId = moodleUserIdDom;
-    if (studentEmail) {
+    // [v0.9.82] Sapaan murni ("halo"/"tes") dijawab sistem beberapa baris di bawah dan
+    // TIDAK butuh identitas Moodle. `resolveStudentByEmail` adalah satu-satunya request
+    // mahal sebelum titik itu — dilewati supaya balasan sapaan terasa instan.
+    const isGreetingOnlyMessage = !mention && !elementContext
+      && detectGreetingOnly(forceAI ? cleanFeedbackPrompt(message) : message);
+    if (studentEmail && !isGreetingOnlyMessage) {
       try {
         const rs = await moodleService.resolveStudentByEmail(projectId, studentEmail, fallbackCourseId ? { courseId: fallbackCourseId } : {});
         if (rs?.found && rs.moodle_user_id) moodleUserId = rs.moodle_user_id;
@@ -2457,7 +2462,7 @@ const chatService = {
 
     // [v0.9.59] Sapaan murni ("halo"/"hai"/"tes") → jawab SISTEM, sapa balik (variatif),
     // jangan sampai jatuh ke kartu konfirmasi AI.
-    if (!mention && !elementContext && detectGreetingOnly(effectiveMessage)) {
+    if (isGreetingOnlyMessage) {
       const text = GREETING_REPLIES[Math.floor(Math.random() * GREETING_REPLIES.length)];
       await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'greeting' });
       await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'greeting', context_used: { response_source: 'system', actions: [], used_model: 'greeting' } });
