@@ -438,31 +438,42 @@ const moodleService = {
     const config = await moodleService.getConfig(projectId);
     const courseMap = config.course_map || {};
 
-    // [v0.9.40] INDEKS LOKAL dulu (cepat). Hindari menarik ~200 peserta × 9 course dari
-    // Moodle live tiap verifikasi (penyebab request lama/timeout). Indeks diisi saat sync.
+    // [v0.9.40] INDEKS LOKAL (tabel moodle_students) dulu — OTORITATIF & cepat. Hindari
+    // menarik ~200 peserta × 9 course dari Moodle live tiap verifikasi. Indeks diisi saat
+    // admin "Perbarui Data Siswa".
+    // [v0.9.75.1] BUGFIX: dulu findRowsForStudent & existsForProject di satu try yang sama →
+    // kalau query PENCARIAN error, catch menelannya, existsForProject TAK PERNAH jalan, lalu
+    // jatuh ke Moodle live → "mode tamu" walau DB sebenarnya terisi. Sekarang dipisah supaya
+    // DB selalu bisa menjawab "tidak terdaftar" (tanpa perlu Moodle live) bila indeks terisi.
+    let dirRows = [];
     try {
-      // findRowsForStudent expand via moodle_user_id → SEMUA kelas siswa ikut (bukan cuma
-      // baris yang emailnya kebetulan terisi).
-      const dirRows = await moodleStudentModel.findRowsForStudent(projectId, { email: targetEmail });
-      if (dirRows && dirRows.length) {
-        const result = buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, requestedClassCode, config);
-        writeStudentResolveCache(cacheKey, result);
-        return result;
-      }
-      // Indeks SUDAH terisi tapi email tak ada → jawab cepat "tidak ditemukan" (jangan bebani
-      // Moodle live). Indeks KOSONG (belum pernah sinkron) → lanjut pencarian live (sekali).
-      const populated = await moodleStudentModel.existsForProject(projectId);
-      if (populated) {
-        return {
-          found: false, email: targetEmail,
-          class_code: requestedClassCode || null, course_id: requestedCourseId || null,
-          message: 'Email tidak terdaftar sebagai siswa (menurut data kelas tersinkron). Kalau kamu baru didaftarkan di VClass, minta admin Sinkron Moodle ulang.',
-          source: 'directory_miss', debug: []
-        };
-      }
+      // expand via moodle_user_id → SEMUA kelas siswa ikut (bukan cuma baris beremail).
+      dirRows = await moodleStudentModel.findRowsForStudent(projectId, { email: targetEmail });
     } catch (e) {
-      console.warn('[ResolveStudent] indeks lokal gagal, fallback live:', e.message);
+      console.warn('[ResolveStudent] pencarian indeks lokal gagal:', e.message);
     }
+    if (dirRows && dirRows.length) {
+      const result = buildResultFromDirectory(dirRows, targetEmail, requestedCourseId, requestedClassCode, config);
+      writeStudentResolveCache(cacheKey, result);
+      return result;
+    }
+    let directoryPopulated = false;
+    try {
+      directoryPopulated = await moodleStudentModel.existsForProject(projectId);
+    } catch (e) {
+      console.warn('[ResolveStudent] cek existsForProject gagal:', e.message);
+    }
+    // Indeks SUDAH terisi tapi email tak ada → jawab tegas "tidak terdaftar" dari DB.
+    if (directoryPopulated) {
+      return {
+        found: false, email: targetEmail,
+        class_code: requestedClassCode || null, course_id: requestedCourseId || null,
+        directory_populated: true,
+        message: 'Email tidak terdaftar sebagai siswa (menurut data kelas tersinkron). Cek ejaan email, atau minta admin "Perbarui Data Siswa".',
+        source: 'directory_miss', debug: []
+      };
+    }
+    // Indeks KOSONG (belum pernah "Perbarui Data Siswa") → baru lanjut pencarian live (sekali).
 
     // SEMUA course yang termapping (label kelas pakai key course_map apa adanya bila tak
     // bisa dinormalisasi, mis. "9A").

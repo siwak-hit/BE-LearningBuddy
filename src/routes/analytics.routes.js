@@ -9,5 +9,6 @@ router.use(requireAuth);
 router.get('/learning', analyticsController.getLearningAnalytics);
 router.get('/evaluation/export', analyticsController.exportEvaluationDataset);
 router.post('/evaluation/compute', analyticsController.computeEvaluation);
+router.get('/sus', analyticsController.listSus);
 
 module.exports = router;

@@ -1,4 +1,5 @@
 const studentSessionRegistryModel = require('../models/studentSessionRegistry.model');
+const susResponseModel = require('../models/susResponse.model');
 const chatModel = require('../models/chat.model');
 const response = require('../utils/response');
 
@@ -76,6 +77,33 @@ const studentSessionController = {
       return response.success(res, 'Session siswa berhasil dihapus', data);
     } catch (error) {
       return response.error(res, 'Gagal menghapus session siswa', error.message, 500);
+    }
+  },
+
+  // [v0.9.73] Siswa mengirim jawaban SUS di akhir uji coba terpandu (boundary publik).
+  async submitSus(req, res) {
+    try {
+      const projectId = await resolveProjectId(req.body);
+      if (!projectId) return response.error(res, 'projectId/projectKey diperlukan', null, 400);
+
+      const answers = Array.isArray(req.body.answers) ? req.body.answers.map((a) => Number(a)) : [];
+      const score = susResponseModel.computeSusScore(answers);
+      if (score === null) {
+        return response.error(res, '10 jawaban SUS (skala 1..5) diperlukan', null, 400);
+      }
+
+      const data = await susResponseModel.insert({
+        project_id: projectId,
+        session_id: req.body.sessionId || req.body.session_id || null,
+        student_email: req.body.email || req.body.student_email || null,
+        class_code: req.body.classCode || req.body.class_code || null,
+        student_name: req.body.student_name || req.body.fullname || null,
+        answers,
+        score
+      });
+      return response.success(res, 'Jawaban SUS tersimpan', { id: data?.id, score });
+    } catch (error) {
+      return response.error(res, 'Gagal menyimpan jawaban SUS', error.message, 500);
     }
   }
 };

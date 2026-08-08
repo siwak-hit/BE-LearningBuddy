@@ -8,6 +8,7 @@ const asyncHandler = require('../utils/async-handler');
 const response = require('../utils/response');
 const difficultyService = require('../services/ai/difficulty.service');
 const evaluationService = require('../services/ai/evaluation.service');
+const susResponseModel = require('../models/susResponse.model');
 
 const INTENT_LABELS = {
   bantuan_tugas: 'Tugas', cek_tugas_belum_selesai: 'Tugas', bantuan_kumpul_tugas: 'Tugas', buka_aktivitas: 'Aktivitas',
@@ -200,6 +201,25 @@ const analyticsController = {
       return response.error(res, 'Tidak ada pasangan label valid. Pastikan kolom prediksi & label asli berisi: lancar / mulai_bingung / kesulitan.', null, 400);
     }
     return response.success(res, 'Metrik evaluasi berhasil dihitung', metrics, 200);
+  }),
+
+  // [v0.9.73] Rekap jawaban SUS uji coba: daftar respons + rata-rata skor (untuk dashboard
+  // guru + unduh CSV). Skor SUS 0..100; >68 = di atas rata-rata, >80 = sangat baik.
+  listSus: asyncHandler(async (req, res) => {
+    const { projectId } = req.query;
+    if (!projectId || projectId === 'all') {
+      return response.error(res, 'projectId diperlukan', null, 400);
+    }
+    const rows = await susResponseModel.listByProject(projectId);
+    const scores = rows.map((r) => Number(r.score)).filter((n) => Number.isFinite(n));
+    const average = scores.length ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 100) / 100 : 0;
+    return response.success(res, 'Rekap SUS', {
+      rows,
+      count: rows.length,
+      average,
+      min: scores.length ? Math.min(...scores) : 0,
+      max: scores.length ? Math.max(...scores) : 0
+    }, 200);
   })
 };
 

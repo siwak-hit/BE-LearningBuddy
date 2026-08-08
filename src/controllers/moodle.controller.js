@@ -5,6 +5,7 @@ const chunkModel = require('../models/chunk.model'); // <--- INI YANG MEMPERBAIK
 const response = require('../utils/response');
 const chatModel = require('../models/chat.model');
 const lmsRouteModel = require('../models/lmsRoute.model');
+const moodleStudentModel = require('../models/moodleStudent.model');
 
 const maskToken = (token) => {
   if (!token || token.length < 8) return token;
@@ -171,13 +172,23 @@ const moodleController = {
       try {
         identity = await moodleService.resolveStudentByEmail(resolvedProjectId, email, { classCode, courseId });
       } catch (e) {
-        // [v0.9.52] Moodle tak bisa dihubungi (token kadaluarsa / endpoint mati / belum
-        // pernah sinkron) → jangan blokir total; tawarkan MODE TAMU (panduan saja).
+        // [v0.9.75.1] resolveStudentByEmail melempar error (biasanya jalur Moodle live saat
+        // token bermasalah). SEBELUM menawarkan mode tamu, cek DB `moodle_students`: kalau
+        // direktori TERISI, DB otoritatif → jawab "tidak terdaftar", JANGAN mode tamu.
+        const directoryPopulated = await moodleStudentModel.existsForProject(resolvedProjectId).catch(() => false);
+        if (directoryPopulated) {
+          return response.success(res, 'Email tidak terdaftar di data siswa', {
+            found: false, email, class_code: classCode || null,
+            directory_populated: true, allow_guest: false, source: 'directory_miss',
+            message: 'Email ini tidak terdaftar sebagai siswa di data yang tersinkron dari Moodle. Cek ejaan email, atau minta admin "Perbarui Data Siswa".'
+          });
+        }
+        // [v0.9.52] Direktori belum tersinkron & Moodle live bermasalah → mode tamu (jalan terakhir).
         const health = await moodleService.isMoodleDegraded(resolvedProjectId).catch(() => ({ degraded: true, reason: 'connection' }));
-        return response.success(res, 'Moodle tidak dapat dihubungi', {
+        return response.success(res, 'Data siswa belum tersinkron / Moodle bermasalah', {
           found: false, email, class_code: classCode || null,
-          degraded: true, degraded_reason: health.reason || 'connection', allow_guest: true,
-          message: 'Koneksi ke Moodle sedang bermasalah, email belum bisa diverifikasi. Kamu tetap bisa masuk sebagai tamu untuk memakai panduan penggunaan Moodle.'
+          degraded: true, degraded_reason: health.reason || 'connection', allow_guest: true, directory_populated: false,
+          message: 'Data siswa belum tersinkron dari Moodle (atau koneksi Moodle bermasalah), jadi email belum bisa dicek. Minta admin menjalankan "Perbarui Data Siswa". Sementara ini kamu bisa masuk sebagai tamu (mode panduan).'
         });
       }
 
@@ -217,14 +228,25 @@ const moodleController = {
         }
       }
 
-      // [v0.9.52] Email tak ditemukan TAPI Moodle memang sedang bermasalah → izinkan tamu.
-      // (Kalau Moodle sehat & email memang tak terdaftar, tetap ditolak seperti biasa.)
+      // [v0.9.75] DIREKTORI DB OTORITATIF: kalau data siswa sudah tersinkron (tabel
+      // moodle_students) dan email memang TIDAK ADA di situ (source 'directory_miss'),
+      // jawab tegas "tidak terdaftar" — JANGAN jatuh ke mode tamu walau token Moodle live
+      // sedang bermasalah. Verifikasi cukup dari DB, tak perlu Moodle live.
+      if (!identity.found && identity.source === 'directory_miss') {
+        return response.success(res, 'Email tidak terdaftar di data siswa', {
+          ...identity, allow_guest: false,
+          message: identity.message || 'Email ini tidak terdaftar sebagai siswa di data yang tersinkron dari Moodle. Cek ejaan email, atau minta admin melakukan "Perbarui Data Siswa".'
+        });
+      }
+
+      // [v0.9.52] Email tak ditemukan DAN direktori belum tersinkron (source lain) SERTA
+      // Moodle live sedang bermasalah → izinkan tamu sebagai jalan terakhir.
       if (!identity.found) {
         const health = await moodleService.isMoodleDegraded(resolvedProjectId).catch(() => ({ degraded: false }));
         if (health.degraded) {
           return response.success(res, 'Moodle bermasalah — mode tamu', {
             ...identity, degraded: true, degraded_reason: health.reason || 'connection', allow_guest: true,
-            message: 'Koneksi ke Moodle sedang bermasalah. Kamu bisa masuk sebagai tamu (mode panduan penggunaan Moodle).'
+            message: 'Data siswa belum tersinkron dan koneksi ke Moodle sedang bermasalah. Kamu bisa masuk sebagai tamu (mode panduan). Minta admin menjalankan "Perbarui Data Siswa".'
           });
         }
       }

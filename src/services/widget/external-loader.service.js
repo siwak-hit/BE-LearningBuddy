@@ -201,15 +201,6 @@ const externalLoaderService = {
     btn.className = 'alb-ext-launcher-btn';
     btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> ' + safeLauncherText;
 
-    function checkMoodleLoginStatus() {
-      if (document.body.classList.contains('notloggedin')) return false;
-      if (document.querySelector('a[href*="logout.php"]')) return true;
-      if (document.querySelector('.userpicture')) return true;
-      var userNode = document.querySelector('.usertext, .userbutton .usertext, .usermenu .usertext');
-      if (userNode && userNode.innerText.trim() !== '') return true;
-      return false;
-    }
-
     function extractMoodleContext() {
       var ctx = {
         source_url: window.location.href,
@@ -231,6 +222,13 @@ const externalLoaderService = {
 
         var mailto = document.querySelector('a[href^="mailto:"]');
         if (mailto) ctx.email = mailto.href.replace('mailto:', '').trim();
+
+        // Beberapa tema Moodle menaruh email sebagai teks biasa di menu user / kartu profil.
+        if (!ctx.email) {
+          var menuText = (document.querySelector('.usermenu, #usernavigation, .profile_tree, [data-region="user-menu"]') || {}).innerText || '';
+          var em = menuText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);
+          if (em) ctx.email = em[0].trim();
+        }
 
         var userMenu = document.querySelector('[data-userid]');
         if (userMenu) ctx.moodle_user_id = userMenu.getAttribute('data-userid');
@@ -259,19 +257,6 @@ const externalLoaderService = {
       return ctx;
     }
 
-
-
-    function normalizeClassCodeFromText(value) {
-      var raw = String(value || '').toUpperCase().replace(/[-_\\/]+/g, ' ').replace(/\\s+/g, ' ').trim();
-      var m = raw.match(/\\b(7|8|9|10|11|12)\\s*([A-Z])\\b/);
-      if (m) return (m[1] + m[2]).toUpperCase();
-      var roman = raw.match(/\\b(VII|VIII|IX|X|XI|XII)\\s*([A-Z])\\b/);
-      if (roman) {
-        var map = { VII:'7', VIII:'8', IX:'9', X:'10', XI:'11', XII:'12' };
-        return (map[roman[1]] || '') + roman[2];
-      }
-      return '';
-    }
 
     function detectModuleType(node, text) {
       var cls = String(node.className || '').toLowerCase();
@@ -374,410 +359,90 @@ const externalLoaderService = {
       return result;
     }
 
-    function showNotLoggedInAlert() {
-      if (document.getElementById('alb-mini-form-overlay')) return;
+    // [config] Klik widget = LANGSUNG buka AI Buddy (tab baru / PWA bila sudah terpasang).
+    // Tidak ada lagi form email di halaman Moodle. Email siswa diambil otomatis dari
+    // halaman/profil Moodle (same-origin, cookie login ikut) supaya fitur "@materi" di
+    // dalam app tak perlu minta email lagi. Kalau tak terbaca, siswa tetap masuk dan baru
+    // diminta email saat membuka drawer materi.
+    var EMAIL_CACHE_KEY = 'alb_moodle_email';
 
-      var theme = config.theme || {};
-      if (typeof theme === 'string') { try { theme = JSON.parse(theme); } catch (e) { theme = {}; } }
-      var primaryColor = theme.primaryColor || '#0c0a09';
-      var buttonTextColor = theme.buttonTextColor || '#ffffff';
-
-      var overlay = document.createElement('div');
-      overlay.id = 'alb-mini-form-overlay';
-      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
-      overlay.innerHTML = [
-        '<div style="background:#fff;padding:32px 24px;border-radius:16px;width:90%;max-width:340px;box-shadow:0 10px 25px rgba(0,0,0,0.2);font-family:Inter, system-ui, sans-serif;text-align:center;">',
-        '  <div style="font-size:42px;margin-bottom:16px;color:#f59e0b;">🔒</div>',
-        '  <h3 style="margin:0 0 8px 0;font-size:18px;color:#1a1a1a;font-weight:700;">Belum Login VClass</h3>',
-        '  <p style="margin:0 0 24px 0;font-size:13px;color:#666;line-height:1.5;">Silakan login dulu agar AI bisa membaca konteks course. Kalau belum bisa login, kamu tetap bisa lanjut sebagai guest dengan verifikasi email Moodle.</p>',
-        '  <div style="display:flex;flex-direction:column;gap:10px;">',
-        '    <button id="alb-btn-login-vclass" style="width:100%;padding:12px 16px;border:none;background:' + primaryColor + ';color:' + buttonTextColor + ';border-radius:8px;cursor:pointer;font-weight:600;font-size:14px;">Login ke VClass</button>',
-        '    <button id="alb-btn-chat-guest" style="width:100%;padding:12px 16px;border:1px solid #d6d3d1;background:#fff;color:#444;border-radius:8px;cursor:pointer;font-weight:600;font-size:14px;">Lanjut Chat (Guest)</button>',
-        '  </div>',
-        '  <button id="alb-btn-cancel-alert" style="margin-top:16px;background:none;border:none;color:#999;font-size:12px;cursor:pointer;text-decoration:underline;">Batal</button>',
-        '</div>'
-      ].join('');
-      document.body.appendChild(overlay);
-      document.getElementById('alb-btn-login-vclass').onclick = function() { window.location.href = 'https://lms.smpn167jakarta.sch.id/login/index.php'; };
-      document.getElementById('alb-btn-chat-guest').onclick = function() { document.body.removeChild(overlay); showMiniForm(); };
-      document.getElementById('alb-btn-cancel-alert').onclick = function() { document.body.removeChild(overlay); };
+    function readCachedEmail() {
+      try { return localStorage.getItem(EMAIL_CACHE_KEY) || ''; } catch (e) { return ''; }
     }
 
-
-    function showMiniForm(prefillContext, loggedIn) {
-      if (document.getElementById('alb-mini-form-overlay')) return;
-      prefillContext = prefillContext || {};
-      var noteHtml = loggedIn
-        ? '<div style="margin:0 0 14px 0;padding:9px 11px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:12px;color:#1e40af;line-height:1.45;"><b>Kamu sudah login di VClass.</b> Tapi data akunmu belum terbaca otomatis — masukkan email Moodle-mu ya.</div>'
-        : '<div style="margin:0 0 14px 0;padding:9px 11px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;font-size:12px;color:#92400e;line-height:1.45;"><b>Kamu belum login di VClass.</b> Login dulu supaya bisa terdeteksi otomatis, atau lanjut dengan memasukkan email Moodle-mu.</div>';
-      var prefillEmail = prefillContext.email || '';
-      var prefillCourseId = prefillContext.course_id || getCourseIdFromUrl(window.location.href) || null;
-
-      var theme = config.theme || {};
-      if (typeof theme === 'string') { try { theme = JSON.parse(theme); } catch (e) { theme = {}; } }
-      var primaryColor = theme.primaryColor || '#0c0a09';
-      var buttonTextColor = theme.buttonTextColor || '#ffffff';
-
-      var resolvedIdentity = null;
-      var selectedCourse = null;
-      var emailCheckTimeoutCount = 0;
-
-      function escapeHtmlInline(value) {
-        return String(value || '')
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#039;');
-      }
-
-      function normalizeClassCodeLocal(value) {
-        var raw = String(value || '').toUpperCase().trim();
-        var match = raw.match(/\\b(7|8|9|10|11|12)\\s*([A-Z])\\b/);
-        if (match) return (match[1] + match[2]).toUpperCase();
-        return raw;
-      }
-
-      function setMiniStatus(message, type) {
-        var statusEl = document.getElementById('alb-mini-status');
-        if (!statusEl) return;
-        statusEl.innerHTML = message || '';
-        statusEl.style.display = message ? 'block' : 'none';
-        statusEl.style.color = type === 'success' ? '#047857' : (type === 'warning' ? '#92400e' : '#b91c1c');
-        statusEl.style.background = type === 'success' ? '#ecfdf5' : (type === 'warning' ? '#fffbeb' : '#fef2f2');
-        statusEl.style.borderColor = type === 'success' ? '#a7f3d0' : (type === 'warning' ? '#fde68a' : '#fecaca');
-      }
-
-      function setClassEnabled(enabled) {
-        var select = document.getElementById('alb-input-kelas');
-        var submit = document.getElementById('alb-btn-submit');
-        if (select) select.disabled = !enabled;
-        if (submit) submit.disabled = !enabled;
-        if (submit) submit.style.opacity = enabled ? '1' : '0.55';
-      }
-
-      function renderClassOptions(courses) {
-        var select = document.getElementById('alb-input-kelas');
-        if (!select) return;
-
-        select.innerHTML = '<option value="">Pilih kelas dari akun Moodle</option>';
-        selectedCourse = null;
-
-        (courses || []).forEach(function(course, index) {
-          var classCode = normalizeClassCodeLocal(course.class_code || course.classCode || '');
-          var courseId = course.course_id || course.courseId || '';
-          var courseTitle = course.course_title || course.courseTitle || ('Course ' + courseId);
-          if (!classCode || !courseId) return;
-
-          var option = document.createElement('option');
-          option.value = classCode;
-          option.textContent = classCode + ' — ' + courseTitle;
-          option.setAttribute('data-index', String(index));
-          select.appendChild(option);
-        });
-
-        if ((courses || []).length === 1) {
-          var only = courses[0];
-          select.value = normalizeClassCodeLocal(only.class_code || only.classCode || '');
-          selectedCourse = only;
-        }
-
-        setClassEnabled((courses || []).length > 0);
-      }
-
-      function checkEmailAndLoadCourses(autoRun) {
-        var emailInput = document.getElementById('alb-input-email');
-        var checkBtn = document.getElementById('alb-btn-check-email');
-        var email = emailInput ? emailInput.value.trim() : '';
-
-        if (!email || email.indexOf('@') === -1) {
-          if (emailInput) emailInput.style.borderColor = 'red';
-          setMiniStatus('Masukkan email Moodle yang valid terlebih dahulu.', 'error');
-          return;
-        }
-
-        if (emailInput) emailInput.style.borderColor = '#e5e5e5';
-        if (checkBtn) {
-          checkBtn.disabled = true;
-          checkBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin" style="margin-right:6px;"></i>Mengecek...';
-          checkBtn.style.opacity = '0.7';
-        }
-
-        setMiniStatus('Sedang mengecek email ke data peserta Moodle...', 'warning');
-        setClassEnabled(false);
-        renderClassOptions([]);
-
-        fetchWithTimeout(apiBase + '/api/moodle/student/resolve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            projectKey: projectKey,
-            email: email
-          })
-        }, ALB_REQUEST_TIMEOUT_MS, 'Cek email Moodle')
-        .then(function(res) { return res.json(); })
-        .then(function(res) {
-          if (!res || res.status !== 'success' || !res.data || !res.data.found) {
-            resolvedIdentity = null;
-            setMiniStatus((res && res.data && res.data.message) || (res && res.message) || 'Email tidak ditemukan di course Moodle yang tersinkron.', 'error');
-            return;
-          }
-
-          emailCheckTimeoutCount = 0;
-          resolvedIdentity = res.data;
-          var courses = res.data.enrolled_courses || [];
-
-          if (!courses.length) {
-            setMiniStatus('Email ditemukan, tetapi sistem belum menemukan daftar course/kelas dari akun ini. Coba sinkronisasi course di dashboard.', 'error');
-            return;
-          }
-
-          renderClassOptions(courses);
-          var name = res.data.fullname || email.split('@')[0];
-          setMiniStatus('Akun ditemukan: <b>' + escapeHtmlInline(name) + '</b>. Silakan pilih kelas yang ingin digunakan.', 'success');
-        })
-        .catch(function(err) {
-          console.error('[AI Buddy] Gagal cek email Moodle:', err);
-          resolvedIdentity = null;
-          if (err && (err.albTimeout || err.name === 'AbortError')) {
-            emailCheckTimeoutCount += 1;
-            var retryText = emailCheckTimeoutCount >= 3
-              ? 'Sudah 3 kali timeout. Kemungkinan Moodle/server sedang lambat. Coba tanya menu lain dulu atau ulangi beberapa menit lagi.'
-              : 'Coba klik tombol Cek Email sekali lagi. Kalau masih lama, tunggu sebentar lalu ulangi.';
-            setMiniStatus('Cek email ke Moodle terlalu lama, bukan karena email kamu salah. ' + retryText, 'warning');
-          } else {
-            setMiniStatus('Gagal mengecek email. Pastikan koneksi Moodle dan API aktif. Coba klik Cek Email lagi.', 'error');
-          }
-        })
-        .finally(function() {
-          if (checkBtn) {
-            checkBtn.disabled = false;
-            checkBtn.innerHTML = '<i class="fa-solid fa-magnifying-glass" style="margin-right:6px;"></i>Cek Email';
-            checkBtn.style.opacity = '1';
-          }
-        });
-      }
-
-      var overlay = document.createElement('div');
-      overlay.id = 'alb-mini-form-overlay';
-      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);';
-
-      overlay.innerHTML = [
-        '<div style="background:#fff;padding:24px;border-radius:16px;width:92%;max-width:380px;box-shadow:0 10px 25px rgba(0,0,0,0.2);font-family:Inter, system-ui, sans-serif;">',
-        '  <h3 style="margin:0 0 6px 0;font-size:18px;color:#1a1a1a;font-weight:700;">Mulai Sesi Belajar</h3>',
-        '  <p style="margin:0 0 12px 0;font-size:13px;color:#666;line-height:1.5;">Masukkan email Moodle dulu. Setelah email terdeteksi, pilihan kelas akan muncul sesuai course yang kamu ikuti.</p>',
-        noteHtml,
-        '  <label style="display:block;font-size:12px;color:#444;font-weight:700;margin-bottom:6px;">Email Moodle</label>',
-        '  <div style="display:flex;gap:8px;margin-bottom:12px;">',
-        '    <input id="alb-input-email" type="email" value="' + escapeHtmlInline(prefillEmail) + '" placeholder="Email Moodle kamu" style="flex:1;min-width:0;padding:10px 12px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;"">',
-        '    <button id="alb-btn-check-email" type="button" style="padding:10px 12px;border:none;background:'+primaryColor+';color:'+buttonTextColor+';border-radius:8px;cursor:pointer;font-weight:700;font-size:12px;white-space:nowrap;"><i class="fa-solid fa-magnifying-glass" style="margin-right:6px;"></i>Cek Email</button>',
-        '  </div>',
-        '  <div id="alb-mini-status" style="display:none;margin-bottom:12px;padding:9px 10px;border:1px solid #fde68a;border-radius:8px;font-size:12px;line-height:1.4;"></div>',
-        '  <label style="display:block;font-size:12px;color:#444;font-weight:700;margin-bottom:6px;">Kelas / Course</label>',
-        '  <select id="alb-input-kelas" disabled style="width:100%;padding:10px 12px;margin-bottom:18px;border:1px solid #e5e5e5;border-radius:8px;box-sizing:border-box;font-size:14px;outline:none;background:#fff;color:#1a1a1a;"">',
-        '    <option value="">Cek email dulu</option>',
-        '  </select>',
-        '  <div style="display:flex;gap:8px;justify-content:flex-end;">',
-        '    <button id="alb-btn-cancel" style="padding:9px 16px;border:none;background:transparent;color:#666;cursor:pointer;font-weight:600;font-size:13px;border-radius:6px;">Batal</button>',
-        '    <button id="alb-btn-submit" disabled style="padding:9px 16px;border:none;background:'+primaryColor+';color:'+buttonTextColor+';border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;opacity:0.55;transition:opacity 0.2s;">Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i></button>',
-        '  </div>',
-        '</div>'
-      ].join('');
-
-      document.body.appendChild(overlay);
-
-      var emailInput = document.getElementById('alb-input-email');
-      var kelasSelect = document.getElementById('alb-input-kelas');
-      [emailInput, kelasSelect].forEach(function(el) {
-        if (!el) return;
-        el.onfocus = function() { this.style.borderColor = primaryColor; };
-        el.onblur = function() { this.style.borderColor = '#e5e5e5'; };
-      });
-
-      setClassEnabled(false);
-
-      document.getElementById('alb-btn-cancel').onclick = function() {
-        document.body.removeChild(overlay);
-      };
-
-      document.getElementById('alb-btn-check-email').onclick = function() {
-        checkEmailAndLoadCourses(false);
-      };
-
-      var emailInputEl = document.getElementById('alb-input-email');
-      if (emailInputEl) {
-        emailInputEl.addEventListener('input', function() {
-          resolvedIdentity = null;
-          selectedCourse = null;
-          renderClassOptions([]);
-          setClassEnabled(false);
-          setMiniStatus('', '');
-        });
-        emailInputEl.addEventListener('keydown', function(e) {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            checkEmailAndLoadCourses(false);
-          }
-        });
-      }
-
-      document.getElementById('alb-input-kelas').onchange = function() {
-        var selectedClass = this.value;
-        selectedCourse = null;
-        if (resolvedIdentity && Array.isArray(resolvedIdentity.enrolled_courses)) {
-          selectedCourse = resolvedIdentity.enrolled_courses.find(function(course) {
-            return normalizeClassCodeLocal(course.class_code || course.classCode || '') === selectedClass;
-          }) || null;
-        }
-        setClassEnabled(Boolean(selectedClass && selectedCourse));
-      };
-
-      document.getElementById('alb-btn-submit').onclick = function() {
-        var email = document.getElementById('alb-input-email').value.trim();
-        var kelas = document.getElementById('alb-input-kelas').value.trim();
-
-        if (!resolvedIdentity || !resolvedIdentity.found) {
-          setMiniStatus('Cek email dulu sampai akun Moodle ditemukan.', 'error');
-          return;
-        }
-
-        if (!selectedCourse || !kelas) {
-          setMiniStatus('Pilih kelas yang tersedia dari akun Moodle kamu.', 'error');
-          return;
-        }
-
-        var fullName = resolvedIdentity.fullname || email.split('@')[0];
-        var alias = fullName + ' - ' + kelas;
-        sessionStorage.setItem('alb_student_name', fullName);
-
-        var btnSubmit = document.getElementById('alb-btn-submit');
-        btnSubmit.innerHTML = 'Menyiapkan...';
-        btnSubmit.disabled = true;
-        btnSubmit.style.opacity = '0.7';
-
-        var courseId = selectedCourse.course_id || selectedCourse.courseId || prefillCourseId || getCourseIdFromUrl(window.location.href);
-        var courseTitle = selectedCourse.course_title || selectedCourse.courseTitle || null;
-        var courseUrl = selectedCourse.course_url || selectedCourse.courseUrl || null;
-
-        var sessionMeta = {
-          display_name: fullName,
-          moodle_verified: true,
-          moodle_user_id: resolvedIdentity.moodle_user_id || null,
-          username: resolvedIdentity.username || null,
-          email: resolvedIdentity.email || email,
-          class_code: kelas,
-          course_id: courseId,
-          course_title: courseTitle,
-          course_url: courseUrl,
-          enrolled_courses: resolvedIdentity.enrolled_courses || [],
-          page_activities: prefillContext.page_activities || extractCoursePageActivities()
-        };
-
-        var payload = {
-          projectKey: projectKey,
-          sourceUrl: window.location.href,
-          studentAlias: alias,
-          mode: 'external',
-          courseContext: {
-            class_code: kelas,
-            course_id: courseId,
-            course_title: courseTitle,
-            course_url: courseUrl,
-            enrolled_courses: resolvedIdentity.enrolled_courses || [],
-            page_activities: sessionMeta.page_activities || []
-          },
-          pageContext: {
-            title: document.title,
-            heading: (document.querySelector('h1') || {}).innerText || '',
-            summary: (document.querySelector('main p') || {}).innerText || 'Halaman Virtual Class',
-            session_meta: sessionMeta,
-            page_activities: sessionMeta.page_activities || []
-          },
-          moodleContext: sessionMeta
-        };
-
-        fetchWithTimeout(apiBase + '/api/chat/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        }, ALB_REQUEST_TIMEOUT_MS, 'Mulai sesi AI Buddy')
-        .then(function(res) {
-          if (!res.ok) throw new Error('Gagal membuat sesi external.');
-          return res.json();
-        })
-        .then(function(res) {
-          if (res.status === 'success' && res.data.session) {
-            document.body.removeChild(overlay);
-            var targetUrl = appUrl + '/buddy?projectKey=' + encodeURIComponent(projectKey) + '&sessionId=' + encodeURIComponent(res.data.session.id) + '&mode=external';
-            window.open(targetUrl, 'alb_ai_workspace');
-          } else {
-            throw new Error('Gagal menghubungkan ke AI Buddy.');
-          }
-        })
-        .catch(function(err) {
-          console.error('[AI Buddy] Error:', err);
-          setMiniStatus((err && (err.albTimeout || err.name === 'AbortError')) ? 'Membuka sesi terlalu lama. Coba klik Mulai Sesi lagi. Jika masih timeout 3 kali, kemungkinan Moodle/server sedang lambat.' : 'Gagal menghubungkan ke AI Buddy. Coba lagi.', (err && (err.albTimeout || err.name === 'AbortError')) ? 'warning' : 'error');
-          btnSubmit.innerHTML = 'Mulai Sesi <i class="fa-solid fa-arrow-right" style="margin-left:4px;"></i>';
-          btnSubmit.disabled = false;
-          btnSubmit.style.opacity = '1';
-        });
-      };
-
-      if (prefillEmail) {
-        setTimeout(function() { checkEmailAndLoadCourses(true); }, 250);
-      }
+    function cacheEmail(email) {
+      try { if (email) localStorage.setItem(EMAIL_CACHE_KEY, email); } catch (e) {}
     }
 
+    // Halaman profil Moodle = sumber email paling andal lintas tema. Origin sama dengan
+    // halaman ini, jadi cookie sesi ikut terkirim dan tak ada masalah CORS.
+    function fetchEmailFromProfile(userId) {
+      if (!userId) return Promise.resolve('');
+      return fetchWithTimeout('/user/profile.php?id=' + encodeURIComponent(userId), { credentials: 'same-origin' }, 8000, 'Baca profil Moodle')
+        .then(function(r) { return r.ok ? r.text() : ''; })
+        .then(function(html) {
+          var m = String(html || '').match(/mailto:([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/i);
+          return m ? m[1].trim() : '';
+        })
+        .catch(function() { return ''; });
+    }
+
+    function resolveStudentEmail(ctx) {
+      if (ctx.email) return Promise.resolve(ctx.email);
+      var cached = readCachedEmail();
+      if (cached) return Promise.resolve(cached);
+      return fetchEmailFromProfile(ctx.moodle_user_id);
+    }
+
+    function openWorkspace(sessionId) {
+      var targetUrl = appUrl + '/buddy?projectKey=' + encodeURIComponent(projectKey)
+        + (sessionId ? '&sessionId=' + encodeURIComponent(sessionId) + '&mode=external' : '&view=ai');
+      window.open(targetUrl, 'alb_ai_workspace');
+    }
 
     btn.onclick = function() {
-      btn.innerHTML = '<span style="font-size:18px;display:inline-block;animation:spin 1s linear infinite;">↻</span><style>@keyframes spin { 100% { transform:rotate(360deg); } }</style>';
+      btn.innerHTML = '<span style="font-size:18px;display:inline-block;animation:spin 1s linear infinite;">&#8635;</span><style>@keyframes spin { 100% { transform:rotate(360deg); } }</style>';
       btn.disabled = true;
+
+      var resetBtn = function() {
+        btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> ' + safeLauncherText;
+        btn.disabled = false;
+      };
 
       var ctx = extractMoodleContext();
       ctx.page_activities = extractCoursePageActivities();
-      var isLoggedIn = checkMoodleLoginStatus();
 
-      // [v0.9.14] Sudah login + data user & course terbaca → langsung auto ke AIworkspace.
-      // Kalau belum login ATAU data belum terbaca → tampilkan form (dengan catatan kontekstual).
-      if (isLoggedIn && (ctx.email || ctx.moodle_user_id) && ctx.course_id) {
-        fetchWithTimeout(apiBase + '/api/chat/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            projectKey: projectKey,
-            sourceUrl: window.location.href,
-            pageContext: { title: document.title, session_meta: ctx, page_activities: ctx.page_activities || [] },
-            courseContext: {
-              course_id: ctx.course_id || null,
-              course_title: ctx.course_title || null,
-              page_activities: ctx.page_activities || []
-            },
-            moodleContext: ctx
-          })
-        }, ALB_REQUEST_TIMEOUT_MS, 'Auto sesi AI Buddy')
+      resolveStudentEmail(ctx)
+        .then(function(email) {
+          if (email) { ctx.email = email; cacheEmail(email); }
+
+          return fetchWithTimeout(apiBase + '/api/chat/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              projectKey: projectKey,
+              sourceUrl: window.location.href,
+              pageContext: { title: document.title, session_meta: ctx, page_activities: ctx.page_activities || [] },
+              courseContext: {
+                course_id: ctx.course_id || null,
+                course_title: ctx.course_title || null,
+                page_activities: ctx.page_activities || []
+              },
+              moodleContext: ctx
+            })
+          }, ALB_REQUEST_TIMEOUT_MS, 'Membuka AI Buddy');
+        })
         .then(function(r) { return r.json(); })
         .then(function(res) {
-          btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
-          btn.disabled = false;
-
-          if (res.status === 'success' && res.data && res.data.session) {
-            var targetUrl = appUrl + '/buddy?projectKey=' + encodeURIComponent(projectKey) + '&sessionId=' + encodeURIComponent(res.data.session.id) + '&mode=external';
-            window.open(targetUrl, 'alb_ai_workspace');
-          } else {
-            showMiniForm(ctx, isLoggedIn);
-          }
+          resetBtn();
+          openWorkspace(res && res.status === 'success' && res.data && res.data.session ? res.data.session.id : null);
         })
         .catch(function(err) {
-          console.error('[AI Buddy] Auto session gagal (CORS/Network):', err);
-          btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
-          btn.disabled = false;
-          showMiniForm(ctx, isLoggedIn);
+          // Server/koneksi bermasalah → tetap buka app; app membuat sesinya sendiri.
+          console.error('[AI Buddy] Gagal menyiapkan sesi, buka app tanpa sessionId:', err);
+          resetBtn();
+          openWorkspace(null);
         });
-      } else {
-        btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> Tanya AI';
-        btn.disabled = false;
-        showMiniForm(ctx, isLoggedIn);
-      }
     };
 
     document.body.appendChild(btn);
