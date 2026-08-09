@@ -9,6 +9,7 @@ const contextBuilderService = require('../rag/context-builder.service');
 const promptService = require('../ai/prompt.service');
 const geminiService = require('../ai/gemini.service');
 const systemResponseService = require('./system-response.service');
+const contextRulesService = require('./context-rules.service');
 const ruleService = require('./rule.service');
 const pageTemplateService = require('../template/page-template.service');
 const activityModel = require('../../models/activity.model');
@@ -2248,6 +2249,65 @@ async function buildAiConfirmOrExhausted({ sessionId, effectiveMessage, detected
   };
 }
 
+// [v0.9.86] Pertanyaan DI LUAR konteks materi → JANGAN dijawab AI. Balas penjelasan +
+// saran pertanyaan yang masih dalam konteks (mengikuti kata tanya user).
+async function buildOutOfContextResponse({ sessionId, effectiveMessage, detectedIntent, studentName, aiUsage, safetyState, ctx }) {
+  const suggestions = contextRulesService.buildSuggestions(effectiveMessage, ctx, 3);
+  const text = addStudentGreeting(
+    'Hmm, pertanyaan ini kelihatannya **di luar materi** yang sedang kita pelajari, jadi aku belum bisa menjawabnya. 🙏\n\nAku hanya bisa membantu seputar materi kelasmu. Mungkin kamu bisa coba salah satu pertanyaan ini:',
+    studentName
+  );
+  const actions = suggestions.map((q) => ({ type: 'suggested_question', label: q, prompt: q }));
+  // Tombol bantu: lihat daftar konteks lengkap.
+  actions.push({ type: 'show_context', label: 'Lihat konteks yang bisa ditanya' });
+
+  // Pesan user SUDAH disimpan di alur utama sebelum retrieval — cukup simpan balasan.
+  await chatModel.createMessage({
+    session_id: sessionId, role: 'assistant', message: text, intent: 'out_of_context',
+    context_used: { response_source: 'system', actions, used_model: 'context_guard' }
+  });
+
+  return {
+    intent: 'out_of_context', response_source: 'system',
+    ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings,
+    botMessage: { message: text, actions }
+  };
+}
+
+// [v0.9.86] Tombol sidebar "Konteks yang Bisa Ditanya" → tabel daftar materi/konteks.
+// Data tabel dikirim lewat action `context_table`; FE menampilkan 3 baris + tombol detail.
+async function buildContextTableResponse({ sessionId, projectId, studentName, aiUsage, safetyState, courseId }) {
+  const ctx = await contextRulesService.getProjectContext(projectId, courseId);
+  const rows = contextRulesService.buildContextList(ctx, 30);
+
+  // Simpan jejak permintaan siswa (tombol sidebar) supaya riwayat tetap koheren saat reload.
+  await chatModel.createMessage({ session_id: sessionId, role: 'user', message: 'Konteks apa saja yang bisa aku tanyakan?', intent: 'daftar_konteks' }).catch(() => {});
+
+  let text;
+  if (!rows.length) {
+    text = addStudentGreeting('Saat ini aku **belum punya materi** yang tersinkron untuk kelasmu, jadi belum ada konteks yang bisa ditanyakan. Coba lagi nanti ya, atau tanyakan ke gurumu. 🙏', studentName);
+    await chatModel.createMessage({ session_id: sessionId, role: 'assistant', message: text, intent: 'daftar_konteks', context_used: { response_source: 'system', actions: [], used_model: 'context_list' } });
+    return { intent: 'daftar_konteks', response_source: 'system', ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings, botMessage: { message: text, actions: [] } };
+  }
+
+  text = addStudentGreeting(
+    `Ini **daftar konteks** yang bisa aku bantu jawab (${rows.length} topik). Aku **hanya menjawab** pertanyaan seputar topik-topik di bawah ini ya. Kalau kamu bertanya di luar ini, aku tidak akan menjawabnya. 😊`,
+    studentName
+  );
+  const actions = [{ type: 'context_table', rows }];
+
+  await chatModel.createMessage({
+    session_id: sessionId, role: 'assistant', message: text, intent: 'daftar_konteks',
+    context_used: { response_source: 'system', actions, used_model: 'context_list' }
+  });
+
+  return {
+    intent: 'daftar_konteks', response_source: 'system',
+    ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings,
+    botMessage: { message: text, actions }
+  };
+}
+
 // [v0.9.59 #4] DETAIL tugas/kuis: pertanyaan atribut item (tenggat, format, durasi, dll) →
 // konfirmasi item mana (list) lalu jawab dari SISTEM pakai data Moodle. Atribut yang tak
 // tersedia via WS (mis. jumlah soal) diarahkan "cek di VClass". Materi/forum tetap via AI.
@@ -2534,6 +2594,15 @@ const chatService = {
     }
 
     let detectedIntent = intent || await intentService.detect(effectiveMessage, elementContext, { allowAIIntent: !forceAI });
+
+    // [v0.9.86] Tombol sidebar "Konteks yang Bisa Ditanya" → tabel daftar materi/konteks.
+    if (detectedIntent === 'daftar_konteks') {
+      return await buildContextTableResponse({
+        sessionId, projectId, studentName,
+        aiUsage: aiRateLimitService.getStatus(sessionId),
+        safetyState, courseId: fallbackCourseId
+      });
+    }
 
     // [v0.9.65] Intent "meta" yang confidence-nya tinggi dari rule-based JANGAN ditimpa oleh
     // override sidebar/LMS-status/materi — mis. keluhan "kok nilai kecil padahal udah ngerjain
@@ -3499,6 +3568,26 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       const retrievalSourceType = shouldForceMaterialRetrieval ? 'document_chunk' : (expectedSourceType || 'all');
       retrievalResults = await retrievalService.retrieve(projectId, retrievalQuery, pageContext, 4, { sourceType: retrievalSourceType, courseId: fallbackCourseId });
       contextString = contextBuilderService.build(retrievalResults);
+    }
+
+    // ========================================================
+    // [v0.9.86] KUNCI KONTEKS: pertanyaan materi yang kata intinya tidak ada di kosakata
+    // materi kelas → JANGAN dijawab (baik mode Sistem maupun AI). Balas "di luar konteks"
+    // + saran pertanyaan yang mengikuti kata tanya user. Berlaku hanya untuk pertanyaan
+    // materi/penjelasan (bukan LMS/tutorial/greeting yang sudah ditangani di atas).
+    // ponytail: getProjectContext dibaca dari cache 5 menit → beban DB kecil.
+    // ========================================================
+    const isMaterialQuery = !shouldSkipRetrieval
+      && !LMS_INTENTS.includes(detectedIntent)
+      && (shouldForceMaterialRetrieval || forceAI || detectedIntent === 'penjelasan_materi');
+    if (isMaterialQuery) {
+      const ctx = await contextRulesService.getProjectContext(projectId, fallbackCourseId);
+      if (contextRulesService.isOutOfContext(effectiveMessage, ctx)) {
+        return await buildOutOfContextResponse({
+          sessionId, effectiveMessage, detectedIntent, studentName,
+          aiUsage: aiRateLimitService.getStatus(sessionId), safetyState, ctx
+        });
+      }
     }
 
     // ========================================================
