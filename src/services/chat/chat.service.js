@@ -2450,12 +2450,12 @@ const chatService = {
 
     const pageType = pageContext?.type || pageContext?.pageType || 'guest_home';
 
+    // [v0.9.85] Lockdown key-based (server-side) dihapus. Kalau ada sesi lama yang masih
+    // ter-lock dari mekanisme lama, bersihkan diam-diam agar tak menggantung — lockdown
+    // sekarang murni timer di FE (lihat safety-overlays.js).
     if (safetyState.locked) {
-      return {
-        response_source: 'system',
-        is_locked: true,
-        botMessage: { message: 'Chat dikunci. Minta unlock key ke guru.', actions: [] }
-      };
+      safetyState.locked = false;
+      try { await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } }); } catch (_) {}
     }
 
     const effectiveMessage = forceAI ? cleanFeedbackPrompt(message) : message;
@@ -3107,7 +3107,11 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
 
     if (!isAiFollowupPrompt(effectiveMessage, forceAI) && moderationResult.isFlagged && ['hate_speech', 'profanity'].includes(moderationResult.type)) {
       safetyState.warnings += 1;
-      if (safetyState.warnings >= 3) safetyState.locked = true;
+      // [v0.9.85] Lockdown TIDAK lagi dipasang server-side (tanpa key). Server hanya
+      // menghitung `warnings` (persisten per-sesi, tahan reload) + menyensor. Keputusan
+      // lockdown ada di FE: aktif hanya bila guru menyalakan switch di dashboard, dengan
+      // timer 1 menit yang naik tiap pelanggaran (disimpan di localStorage). Karena itu
+      // `safetyState.locked` tak pernah di-set true di sini.
       await chatModel.updateSession(sessionId, { page_context: { ...pageContextState, safety_state: safetyState } });
 
       // [v0.9.84] Kata kasarnya DISENSOR (mis. "BEGO banget" → "**** banget"). Versi
@@ -3124,8 +3128,9 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       return {
         intent: detectedIntent, response_source: 'system',
         censored_message: censoredMessage,
+        moderation_type: moderationResult.type, // 'profanity' | 'hate_speech'
         botMessage: { message: warningText, actions: [] },
-        is_locked: safetyState.locked, warnings: safetyState.warnings,
+        is_locked: false, warnings: safetyState.warnings,
         ai_usage: aiRateLimitService.getStatus(sessionId)
       };
     }

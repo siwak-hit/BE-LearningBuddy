@@ -1,5 +1,11 @@
 const AI_MAX = parseInt(process.env.AI_MAX_USAGE_PER_WINDOW) || 3;
-const COOLDOWN_MS = (parseInt(process.env.AI_COOLDOWN_SECONDS) || 180) * 1000;
+// [v0.9.85] Cooldown per-siswa dipangkas ke 60 dtk (dulu 180) supaya konsisten dengan
+// "sesi AI reset tiap 1 menit". Cooldown ini yang muncul saat request AI ke-4.
+const COOLDOWN_MS = (parseInt(process.env.AI_COOLDOWN_SECONDS) || 60) * 1000;
+// [v0.9.85] Jendela sesi AI per-siswa: kalau tidak ada request AI selama 60 dtk, hitungan
+// used direset ke 0 (sliding window). Jadi 3 request beruntun → cooldown, tapi kalau
+// jeda >1 menit, hitungan mulai dari 0 lagi.
+const USER_WINDOW_MS = (parseInt(process.env.AI_USER_WINDOW_SECONDS) || 60) * 1000;
 
 // [v0.9.58] Kuota AI BERSAMA berbasis JENDELA 1 JAM. Persentase NAIK tiap jawaban AI dan
 // TIDAK pernah turun dalam jendela; saat mencapai budget → AI dinonaktifkan (exhausted).
@@ -88,8 +94,17 @@ const aiRateLimitService = {
       };
     }
 
+    // [v0.9.85] Sliding window: idle >60 dtk sejak request AI terakhir → reset hitungan.
+    if (userData.lastUsedAt && (now - userData.lastUsedAt) >= USER_WINDOW_MS && Number(userData.used || 0) > 0) {
+      this.users.set(sessionId, { used: 0, cooldownEndsAt: null, limitReached: false, lastUsedAt: 0 });
+      return this._defaultStatus();
+    }
+
     const used = Number(userData.used || 0);
     const limitReached = used >= AI_MAX || Boolean(userData.limitReached);
+    const windowRemaining = userData.lastUsedAt
+      ? Math.max(0, Math.ceil((userData.lastUsedAt + USER_WINDOW_MS - now) / 1000))
+      : 0;
 
     return {
       used,
@@ -98,6 +113,7 @@ const aiRateLimitService = {
       limit_reached: limitReached,
       cooldown_active: false,
       cooldown_remaining_seconds: 0,
+      window_remaining_seconds: windowRemaining,
       canUseAI: !limitReached
     };
   },
@@ -117,7 +133,8 @@ const aiRateLimitService = {
     this.users.set(sessionId, {
       used: newUsed,
       cooldownEndsAt: null,
-      limitReached
+      limitReached,
+      lastUsedAt: Date.now() // [v0.9.85] penanda sliding window 1 menit
     });
 
     // Catatan: penghitung GLOBAL kini dicatat di gemini.service (recordGlobalRequest)
@@ -148,6 +165,7 @@ const aiRateLimitService = {
       limit_reached: false,
       cooldown_active: false,
       cooldown_remaining_seconds: 0,
+      window_remaining_seconds: 0,
       canUseAI: true
     };
   }
