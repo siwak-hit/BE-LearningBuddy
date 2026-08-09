@@ -30,6 +30,22 @@ function hashText(value = '') {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
 }
 
+// [v0.9.74] Cosine similarity untuk semantic cache. Dipakai saat kedua sisi punya
+// embedding (vektor dari model yang sama). Return 0 kalau bentuk vektor tak valid.
+function cosine(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
 function jaccard(a = '', b = '') {
   const aSet = new Set(normalizeQuestion(a).split(/\s+/).filter(Boolean));
   const bSet = new Set(normalizeQuestion(b).split(/\s+/).filter(Boolean));
@@ -42,6 +58,7 @@ function jaccard(a = '', b = '') {
 const aiResponseCacheModel = {
   hashText,
   normalizeQuestion,
+  cosine,
 
   buildCacheKey(projectId, normalizedQuestion, contextHash = '') {
     return hashText([projectId || '-', normalizedQuestion || '-', contextHash || '-'].join('|'));
@@ -71,7 +88,7 @@ const aiResponseCacheModel = {
     const now = new Date().toISOString();
     let query = getClient()
       .from(TABLE)
-      .select('id, answer, question, normalized_question, intent, context_hash, hit_count')
+      .select('id, answer, question, normalized_question, intent, context_hash, hit_count, embedding')
       .eq('project_id', projectId)
       .or(`expires_at.is.null,expires_at.gt.${now}`)
       .order('updated_at', { ascending: false })
@@ -82,10 +99,35 @@ const aiResponseCacheModel = {
 
     const { data, error } = await query;
     if (error) throw error;
+    const rows = data || [];
 
+    // 1) SEMANTIK (cosine) — jalur utama. Menangkap parafrase yang beda kata tapi
+    // maksud sama (mis. "gimana bikin akun" vs "cara registrasi"). Hanya jalan bila
+    // query embedding tersedia DAN baris cache punya embedding. Threshold sengaja
+    // ketat (default 0.88) agar tidak salah menyajikan jawaban pertanyaan lain.
+    const qEmb = options.queryEmbedding;
+    if (Array.isArray(qEmb) && qEmb.length) {
+      let best = null;
+      let bestScore = 0;
+      rows.forEach((row) => {
+        if (!Array.isArray(row.embedding) || row.embedding.length === 0) return;
+        const score = cosine(qEmb, row.embedding);
+        if (score > bestScore) {
+          best = row;
+          bestScore = score;
+        }
+      });
+      const cosineThreshold = Number(options.cosineThreshold || 0.88);
+      if (best && bestScore >= cosineThreshold) {
+        return { ...best, similarity_score: bestScore, similarity_method: 'cosine' };
+      }
+    }
+
+    // 2) LEKSIKAL (Jaccard) — jaring pengaman bila embedding kosong/gagal (mis. entri
+    // cache lama sebelum kolom embedding terisi, atau API embedding sedang down).
     let best = null;
     let bestScore = 0;
-    (data || []).forEach((row) => {
+    rows.forEach((row) => {
       const score = jaccard(normalized, row.normalized_question || row.question || '');
       if (score > bestScore) {
         best = row;
@@ -95,7 +137,7 @@ const aiResponseCacheModel = {
 
     const threshold = Number(options.threshold || 0.72);
     if (!best || bestScore < threshold) return null;
-    return { ...best, similarity_score: bestScore };
+    return { ...best, similarity_score: bestScore, similarity_method: 'jaccard' };
   },
 
   async incrementHit(id) {

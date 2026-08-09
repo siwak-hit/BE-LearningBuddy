@@ -10,7 +10,30 @@ const MODEL_CHAIN = [
   'gemini-3.5-flash'
 ];
 
+// [v0.9.74] Model embedding untuk semantic cache. WAJIB satu model konsisten:
+// vektor tulis & baca harus dari model yang sama, kalau tidak dimensinya beda dan
+// cosine jadi tak bermakna. Jangan di-chain seperti MODEL_CHAIN generate.
+const EMBED_MODEL = 'text-embedding-004';
+
 const geminiService = {
+  // [v0.9.74] Embedding 1 teks untuk semantic cache. Sengaja TIDAK pernah throw:
+  // kalau gagal (key kosong, model 404, jaringan) → return null, dan pemanggil
+  // otomatis jatuh balik ke kemiripan Jaccard. Tidak menambah counter kuota AI chat.
+  async embedText(text) {
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const input = String(text || '').trim();
+    if (!apiKey || input.length < 3) return null;
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const res = await ai.models.embedContent({ model: EMBED_MODEL, contents: input });
+      const values = res?.embeddings?.[0]?.values || res?.embedding?.values || null;
+      return Array.isArray(values) && values.length ? values : null;
+    } catch (error) {
+      console.warn('[Gemini embed] gagal:', error.message);
+      return null;
+    }
+  },
+
   async generateWithFallback(promptText) {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
 

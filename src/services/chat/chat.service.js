@@ -3831,12 +3831,22 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
     const cacheKey = cacheable
       ? aiResponseCacheModel.buildCacheKey(projectId, aiResponseCacheModel.normalizeQuestion(effectiveMessage), cacheContextHash)
       : '';
+    // [v0.9.74] Embedding pertanyaan untuk semantic cache. Dihitung LAZY (hanya saat
+    // exact-key meleset) lalu dipakai ulang untuk baca (cosine) & tulis (simpan vektor),
+    // supaya cukup 1 panggilan embedding per pertanyaan.
+    let cacheQueryEmbedding = null;
 
     if (cacheable && !forceAI) {
       try {
         let cached = await aiResponseCacheModel.findByKey(projectId, cacheKey);
         if (!cached) {
-          cached = await aiResponseCacheModel.findBestSimilar(projectId, effectiveMessage, { intent: detectedIntent, threshold: 0.8 });
+          cacheQueryEmbedding = await geminiService.embedText(effectiveMessage);
+          cached = await aiResponseCacheModel.findBestSimilar(projectId, effectiveMessage, {
+            intent: detectedIntent,
+            queryEmbedding: cacheQueryEmbedding,
+            cosineThreshold: 0.88,
+            threshold: 0.8
+          });
         }
         if (cached?.answer) {
           aiResponseCacheModel.incrementHit(cached.id).catch(() => {});
@@ -3953,6 +3963,10 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
         // [v0.5.0] Simpan jawaban AI ke cache agar pertanyaan serupa berikutnya
         // bisa dijawab sistem tanpa memakai kuota AI.
         if (cacheable && cacheKey && geminiResult.text) {
+          // [v0.9.74] Pakai embedding yang sudah dihitung saat baca cache. Kalau jalur
+          // forceAI (baca dilewati) → hitung sekarang. null aman: entri tetap tersimpan,
+          // pencocokan berikutnya jatuh ke Jaccard sampai vektor terisi.
+          if (!cacheQueryEmbedding) cacheQueryEmbedding = await geminiService.embedText(effectiveMessage);
           aiResponseCacheModel.upsertCache({
             project_id: projectId,
             cache_key: cacheKey,
@@ -3962,6 +3976,7 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
             intent: detectedIntent,
             source_type: expectedSourceType || 'document_chunk',
             context_hash: cacheContextHash,
+            embedding: cacheQueryEmbedding,
             model: geminiResult.model,
             expires_at: getExpiresAt()
           }).catch((e) => console.warn('[Cache] gagal menyimpan cache:', e.message));
