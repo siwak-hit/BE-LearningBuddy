@@ -971,33 +971,58 @@ function detectGeneralSafeQuestion(message = '') {
   return { type: null };
 }
 
-// [v0.9.87] Deteksi INPUT BERTIPE PERINTAH (imperatif) — mis. "buatkan 5 soal materi CMS".
-// Fokus ke perintah membuat soal/latihan (yang bisa kita layani via generator kuis @materi).
-function detectMaterialCommand(message = '') {
+// [v0.9.88] Deteksi INTENT PERMINTAAN (request) terhadap materi. Berbeda dari intent
+// PERTANYAAN biasa ("apa itu X" → jawab langsung). Request = user MINTA sistem melakukan
+// sesuatu atas materi: buat soal / rangkuman / poin penting / penjelasan.
+// Mengembalikan { isRequest, type, count, topicQuery }.
+//   type: 'quiz' | 'summary' | 'keypoints' | 'explain'
+function detectMaterialRequest(message = '') {
   const raw = String(message || '');
   const t = normalizeText(raw);
-  const isCmd = /\b(buatkan|buatin|buat|bikinkan|bikinin|bikin|susunkan|susun|tuliskan|tulis|generate)\b/.test(t);
-  if (!isCmd) return { isCommand: false };
+  const makeVerb = /\b(buatkan|buatin|buat|bikinkan|bikinin|bikin|susunkan|susun|tuliskan|tulis|generate|kerjakan)\b/.test(t);
 
-  const wantsQuiz = /\b(soal|latihan|kuis|quiz|pertanyaan|pilihan ganda|ujian|butir)\b/.test(t);
+  let type = null;
+  if (/\b(soal|latihan|kuis|quiz|pilihan ganda|ujian|butir)\b/.test(t) && (makeVerb || /\b(kasih|berikan|minta)\b/.test(t))) {
+    type = 'quiz';
+  } else if (/\b(rangkum|rangkumkan|rangkumin|ringkas|ringkaskan|ringkasin|ringkasan|rangkuman|resume|kesimpulan|simpulkan|intisari)\b/.test(t)) {
+    type = 'summary';
+  } else if (/\b(poin penting|poin-poin|poin utama|garis besar|kata kunci|inti materi|intinya)\b/.test(t)) {
+    type = 'keypoints';
+  } else if (/\b(jelaskan|jelasin|terangkan|cari tahu|nyari tahu|mencari tahu|carikan|cariin|pelajari|belajar tentang|pahami|memahami|ceritakan|ceritain|bantu.{0,15}(paham|memahami|belajar|mengerti))\b/.test(t)) {
+    type = 'explain';
+  } else if (makeVerb && /\bmateri\b/.test(t)) {
+    type = 'explain';
+  }
+  if (!type) return { isRequest: false };
+
   let count = 0;
   const cm = t.match(/(\d{1,2})\s*(soal|butir|nomor|pertanyaan)/);
   if (cm) count = Math.min(10, Math.max(1, parseInt(cm[1], 10)));
 
-  // Ekstrak topik: setelah "materi/tentang/untuk/dari/topik/bab", atau sisa kalimat.
+  // Ekstrak topik: setelah kata penghubung, atau sisa kalimat setelah kata perintah dibuang.
   let topicQuery = '';
-  const tm = raw.match(/\b(?:materi|tentang|untuk|dari|topik|bab)\s+(.+)$/i);
+  const tm = raw.match(/\b(?:materi|tentang|mengenai|soal|topik|bab|dari|untuk|akan)\s+(.+)$/i);
   if (tm) {
     topicQuery = tm[1];
   } else {
     topicQuery = raw
-      .replace(/\b(buatkan|buatin|buat|bikinkan|bikinin|bikin|susunkan|susun|tuliskan|tulis|generate|saya|aku|tolong|dong|ya|sih)\b/gi, '')
+      .replace(/\b(buatkan|buatin|buat|bikinkan|bikinin|bikin|susunkan|susun|tuliskan|tulis|generate|kerjakan|rangkumkan|rangkumin|rangkum|ringkaskan|ringkasin|ringkas|jelaskan|jelasin|terangkan|carikan|cariin|ceritakan|ceritain|pelajari|pahami|memahami)\b/gi, '')
+      .replace(/\b(cari tahu|nyari tahu|mencari tahu|poin penting|garis besar|bahasa sederhana|kamu bisa bantu|bisa bantu|tolong|saya|aku|dong|ya|sih|ga|gak|kah)\b/gi, '')
       .replace(/\b\d+\b/g, '')
-      .replace(/\b(soal|butir|nomor|pertanyaan|latihan|kuis|quiz|pilihan ganda|ujian|untuk|tentang|materi|dari|topik|bab)\b/gi, '')
+      .replace(/\b(soal|butir|nomor|pertanyaan|latihan|kuis|quiz|pilihan ganda|ujian|rangkuman|ringkasan|kesimpulan|untuk|tentang|mengenai|materi|dari|topik|bab)\b/gi, '')
+      .replace(/[?.!]+/g, ' ')
       .replace(/\s+/g, ' ').trim();
   }
-  return { isCommand: true, wantsQuiz, count, topicQuery };
+  return { isRequest: true, type, count, topicQuery };
 }
+
+// Teks aksi per tipe permintaan (untuk pesan tawaran & label tombol).
+const REQUEST_LABELS = {
+  quiz: { action: 'buatkan soal latihan', verb: 'Ya, buatkan soal' },
+  summary: { action: 'buatkan rangkuman', verb: 'Ya, rangkum' },
+  keypoints: { action: 'sebutkan poin penting', verb: 'Ya, tampilkan poin penting' },
+  explain: { action: 'jelaskan', verb: 'Ya, jelaskan' }
+};
 
 function buildDateTimeAnswer() {
   const now = new Date();
@@ -2355,25 +2380,30 @@ async function resolveMaterialByTopic(projectId, courseId, topicQuery, pageConte
   };
 }
 
-// [v0.9.87] Perintah membuat soal tentang materi (in-context) → tawarkan konfirmasi dulu.
-// FE: klik "Ya" → gate email (kalau belum dikenal) → generator kuis @materi.
-async function buildMakeQuizOffer({ sessionId, effectiveMessage, studentName, aiUsage, safetyState, material, count }) {
+// [v0.9.88] Permintaan atas materi (in-context) → tawarkan konfirmasi dulu.
+// FE: klik "Ya" → gate email (kalau belum dikenal) → jalankan task @materi (soal/rangkum/
+// poin penting/penjelasan). `type` ∈ quiz|summary|keypoints|explain.
+async function buildMaterialRequestOffer({ sessionId, effectiveMessage, studentName, aiUsage, safetyState, material, type, count }) {
   const label = material.title || 'materi ini';
+  const cfg = REQUEST_LABELS[type] || REQUEST_LABELS.explain;
+  const intentName = 'permintaan_' + type;
+  const countSuffix = (type === 'quiz' && count) ? ` (${count} soal)` : '';
   const text = addStudentGreeting(
-    `Perintahmu sepertinya mengarah ke materi **${label}**. Mau aku **buatkan soal latihan** dari materi ini?${count ? ` (${count} soal)` : ''}`,
+    `Permintaanmu sepertinya mengarah ke materi **${label}**. Mau aku **${cfg.action}** dari materi ini?${countSuffix}`,
     studentName
   );
+  const verbLabel = (type === 'quiz' && count) ? `Ya, buatkan ${count} soal` : cfg.verb;
   const actions = [
-    { type: 'confirm_make_quiz', label: count ? `Ya, buatkan ${count} soal` : 'Ya, buatkan soal', payload: { count, material } },
+    { type: 'confirm_material_request', label: verbLabel, payload: { requestType: type, count, material } },
     { type: 'decline_quiz', label: 'Tidak, terima kasih' }
   ];
-  await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'buat_soal' });
+  await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: intentName });
   await chatModel.createMessage({
-    session_id: sessionId, role: 'assistant', message: text, intent: 'buat_soal',
-    context_used: { response_source: 'system', actions, used_model: 'make_quiz_offer' }
+    session_id: sessionId, role: 'assistant', message: text, intent: intentName,
+    context_used: { response_source: 'system', actions, used_model: 'material_request_offer' }
   });
   return {
-    intent: 'buat_soal', response_source: 'system',
+    intent: intentName, response_source: 'system',
     ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings,
     botMessage: { message: text, actions }
   };
@@ -2675,26 +2705,26 @@ const chatService = {
       });
     }
 
-    // [v0.9.87] INPUT BERTIPE PERINTAH (mis. "buatkan 5 soal materi CMS"). Kalau perintah
-    // membuat soal / menyebut "materi": cek apakah topiknya masih di dalam konteks.
-    //  • di luar konteks → balasan "di luar konteks" + saran (poin 1).
-    //  • di dalam konteks → tawarkan buat soal latihan untuk materi tsb (FE: gate email → kuis).
+    // [v0.9.88] INTENT PERMINTAAN atas materi (buat soal / rangkuman / poin penting /
+    // penjelasan). Beda dari pertanyaan biasa: user MINTA sistem melakukan sesuatu.
+    //  • di luar konteks → balasan "di luar konteks" + saran.
+    //  • di dalam konteks → tawarkan aksi untuk materi tsb (FE: gate email → task @materi).
     if (!mention && !elementContext && !forceAI) {
-      const cmd = detectMaterialCommand(effectiveMessage);
-      if (cmd.isCommand && (cmd.wantsQuiz || /\bmateri\b/i.test(effectiveMessage))) {
+      const req = detectMaterialRequest(effectiveMessage);
+      if (req.isRequest) {
         const ctx = await contextRulesService.getProjectContext(projectId, fallbackCourseId);
-        const material = contextRulesService.isOutOfContext(cmd.topicQuery || effectiveMessage, ctx)
+        const material = contextRulesService.isOutOfContext(req.topicQuery || effectiveMessage, ctx)
           ? null
-          : await resolveMaterialByTopic(projectId, fallbackCourseId, cmd.topicQuery || effectiveMessage, pageContext);
+          : await resolveMaterialByTopic(projectId, fallbackCourseId, req.topicQuery || effectiveMessage, pageContext);
 
         if (material && material.documentId) {
-          return await buildMakeQuizOffer({
+          return await buildMaterialRequestOffer({
             sessionId, effectiveMessage, studentName,
             aiUsage: aiRateLimitService.getStatus(sessionId), safetyState,
-            material, count: cmd.count
+            material, type: req.type, count: req.count
           });
         }
-        // Perintah bukan tentang pelajaran (atau materi spesifik tak ketemu) → di luar konteks.
+        // Permintaan bukan tentang pelajaran (atau materi spesifik tak ketemu) → di luar konteks.
         await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'out_of_context' });
         return await buildOutOfContextResponse({
           sessionId, effectiveMessage, detectedIntent: 'out_of_context', studentName,
