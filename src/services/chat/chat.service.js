@@ -971,6 +971,34 @@ function detectGeneralSafeQuestion(message = '') {
   return { type: null };
 }
 
+// [v0.9.87] Deteksi INPUT BERTIPE PERINTAH (imperatif) — mis. "buatkan 5 soal materi CMS".
+// Fokus ke perintah membuat soal/latihan (yang bisa kita layani via generator kuis @materi).
+function detectMaterialCommand(message = '') {
+  const raw = String(message || '');
+  const t = normalizeText(raw);
+  const isCmd = /\b(buatkan|buatin|buat|bikinkan|bikinin|bikin|susunkan|susun|tuliskan|tulis|generate)\b/.test(t);
+  if (!isCmd) return { isCommand: false };
+
+  const wantsQuiz = /\b(soal|latihan|kuis|quiz|pertanyaan|pilihan ganda|ujian|butir)\b/.test(t);
+  let count = 0;
+  const cm = t.match(/(\d{1,2})\s*(soal|butir|nomor|pertanyaan)/);
+  if (cm) count = Math.min(10, Math.max(1, parseInt(cm[1], 10)));
+
+  // Ekstrak topik: setelah "materi/tentang/untuk/dari/topik/bab", atau sisa kalimat.
+  let topicQuery = '';
+  const tm = raw.match(/\b(?:materi|tentang|untuk|dari|topik|bab)\s+(.+)$/i);
+  if (tm) {
+    topicQuery = tm[1];
+  } else {
+    topicQuery = raw
+      .replace(/\b(buatkan|buatin|buat|bikinkan|bikinin|bikin|susunkan|susun|tuliskan|tulis|generate|saya|aku|tolong|dong|ya|sih)\b/gi, '')
+      .replace(/\b\d+\b/g, '')
+      .replace(/\b(soal|butir|nomor|pertanyaan|latihan|kuis|quiz|pilihan ganda|ujian|untuk|tentang|materi|dari|topik|bab)\b/gi, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+  return { isCommand: true, wantsQuiz, count, topicQuery };
+}
+
 function buildDateTimeAnswer() {
   const now = new Date();
   const tgl = now.toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
@@ -2308,6 +2336,49 @@ async function buildContextTableResponse({ sessionId, projectId, studentName, ai
   };
 }
 
+// [v0.9.87] Cocokkan topik perintah ("materi CMS") ke satu materi nyata (untuk generator kuis).
+async function resolveMaterialByTopic(projectId, courseId, topicQuery, pageContext) {
+  const q = String(topicQuery || '').trim();
+  if (!q) return null;
+  const res = await retrievalService.retrieve(projectId, q, pageContext, 1, {
+    sourceType: 'document_chunk', courseId
+  }).catch(() => []);
+  const top = res && res[0];
+  if (!top) return null;
+  const md = top.metadata || {};
+  const title = top.title || md.title || md.module_name || 'Materi';
+  return {
+    documentId: md.document_id || null,
+    title,
+    url: md.source_url || md.url || md.file_url || null,
+    token: 'materi-' + normalizeText(title).replace(/\s+/g, '-').slice(0, 40)
+  };
+}
+
+// [v0.9.87] Perintah membuat soal tentang materi (in-context) → tawarkan konfirmasi dulu.
+// FE: klik "Ya" → gate email (kalau belum dikenal) → generator kuis @materi.
+async function buildMakeQuizOffer({ sessionId, effectiveMessage, studentName, aiUsage, safetyState, material, count }) {
+  const label = material.title || 'materi ini';
+  const text = addStudentGreeting(
+    `Perintahmu sepertinya mengarah ke materi **${label}**. Mau aku **buatkan soal latihan** dari materi ini?${count ? ` (${count} soal)` : ''}`,
+    studentName
+  );
+  const actions = [
+    { type: 'confirm_make_quiz', label: count ? `Ya, buatkan ${count} soal` : 'Ya, buatkan soal', payload: { count, material } },
+    { type: 'decline_quiz', label: 'Tidak, terima kasih' }
+  ];
+  await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'buat_soal' });
+  await chatModel.createMessage({
+    session_id: sessionId, role: 'assistant', message: text, intent: 'buat_soal',
+    context_used: { response_source: 'system', actions, used_model: 'make_quiz_offer' }
+  });
+  return {
+    intent: 'buat_soal', response_source: 'system',
+    ai_usage: aiUsage, is_locked: safetyState.locked, warnings: safetyState.warnings,
+    botMessage: { message: text, actions }
+  };
+}
+
 // [v0.9.59 #4] DETAIL tugas/kuis: pertanyaan atribut item (tenggat, format, durasi, dll) →
 // konfirmasi item mana (list) lalu jawab dari SISTEM pakai data Moodle. Atribut yang tak
 // tersedia via WS (mis. jumlah soal) diarahkan "cek di VClass". Materi/forum tetap via AI.
@@ -2602,6 +2673,34 @@ const chatService = {
         aiUsage: aiRateLimitService.getStatus(sessionId),
         safetyState, courseId: fallbackCourseId
       });
+    }
+
+    // [v0.9.87] INPUT BERTIPE PERINTAH (mis. "buatkan 5 soal materi CMS"). Kalau perintah
+    // membuat soal / menyebut "materi": cek apakah topiknya masih di dalam konteks.
+    //  • di luar konteks → balasan "di luar konteks" + saran (poin 1).
+    //  • di dalam konteks → tawarkan buat soal latihan untuk materi tsb (FE: gate email → kuis).
+    if (!mention && !elementContext && !forceAI) {
+      const cmd = detectMaterialCommand(effectiveMessage);
+      if (cmd.isCommand && (cmd.wantsQuiz || /\bmateri\b/i.test(effectiveMessage))) {
+        const ctx = await contextRulesService.getProjectContext(projectId, fallbackCourseId);
+        const material = contextRulesService.isOutOfContext(cmd.topicQuery || effectiveMessage, ctx)
+          ? null
+          : await resolveMaterialByTopic(projectId, fallbackCourseId, cmd.topicQuery || effectiveMessage, pageContext);
+
+        if (material && material.documentId) {
+          return await buildMakeQuizOffer({
+            sessionId, effectiveMessage, studentName,
+            aiUsage: aiRateLimitService.getStatus(sessionId), safetyState,
+            material, count: cmd.count
+          });
+        }
+        // Perintah bukan tentang pelajaran (atau materi spesifik tak ketemu) → di luar konteks.
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'out_of_context' });
+        return await buildOutOfContextResponse({
+          sessionId, effectiveMessage, detectedIntent: 'out_of_context', studentName,
+          aiUsage: aiRateLimitService.getStatus(sessionId), safetyState, ctx
+        });
+      }
     }
 
     // [v0.9.65] Intent "meta" yang confidence-nya tinggi dari rule-based JANGAN ditimpa oleh
@@ -3532,19 +3631,29 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
     // ==========================================
     const generalSafe = detectGeneralSafeQuestion(effectiveMessage);
     if (!forceAI && generalSafe.type && !LMS_INTENTS.includes(detectedIntent) && !manualMaterialRequest) {
-      const generalText = generalSafe.type === 'datetime' ? buildDateTimeAnswer() : buildMathAnswer(generalSafe);
-      const generalIntent = generalSafe.type === 'datetime' ? detectedIntent : 'out_of_context';
+      // [v0.9.87] Pertanyaan MATEMATIKA/aritmatika = DI LUAR konteks materi → jangan dihitung/
+      // dijawab AI; pakai balasan "di luar konteks" + saran pertanyaan in-context (poin 1).
+      // (Dulu dijawab "1 + 1 = 2" — terkesan AI menjawab di luar materi.)
+      if (generalSafe.type === 'math') {
+        const ctx = await contextRulesService.getProjectContext(projectId, fallbackCourseId);
+        return await buildOutOfContextResponse({
+          sessionId, effectiveMessage, detectedIntent: 'out_of_context', studentName,
+          aiUsage: aiRateLimitService.getStatus(sessionId), safetyState, ctx
+        });
+      }
 
+      // datetime tetap dijawab (utilitas ringan, bukan materi).
+      const generalText = buildDateTimeAnswer();
       await chatModel.createMessage({
         session_id: sessionId,
         role: 'assistant',
         message: addStudentGreeting(generalText, studentName),
-        intent: generalIntent,
+        intent: detectedIntent,
         context_used: { response_source: 'system', actions: [], used_model: 'system_general_safe' }
       });
 
       return {
-        intent: generalIntent,
+        intent: detectedIntent,
         response_source: 'system',
         ai_usage: aiUsage,
         is_locked: safetyState.locked,
@@ -3577,9 +3686,11 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
     // materi/penjelasan (bukan LMS/tutorial/greeting yang sudah ditangani di atas).
     // ponytail: getProjectContext dibaca dari cache 5 menit → beban DB kecil.
     // ========================================================
-    const isMaterialQuery = !shouldSkipRetrieval
-      && !LMS_INTENTS.includes(detectedIntent)
-      && (shouldForceMaterialRetrieval || forceAI || detectedIntent === 'penjelasan_materi');
+    // [v0.9.87] Diperluas: SEMUA pertanyaan yang sampai ke retrieval (bukan LMS/tutorial/
+    // greeting yang sudah ditangani di atas) ikut dicek konteksnya. Ini memastikan
+    // pertanyaan di luar konteks memicu balasan "di luar konteks" + saran, BUKAN kartu
+    // "mau dialihkan ke AI?" (kartu itu hanya untuk pertanyaan IN-CONTEXT tanpa jawaban sistem).
+    const isMaterialQuery = !shouldSkipRetrieval && !LMS_INTENTS.includes(detectedIntent);
     if (isMaterialQuery) {
       const ctx = await contextRulesService.getProjectContext(projectId, fallbackCourseId);
       if (contextRulesService.isOutOfContext(effectiveMessage, ctx)) {
