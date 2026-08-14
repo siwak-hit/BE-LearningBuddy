@@ -13,6 +13,7 @@ const contextRulesService = require('./context-rules.service');
 const ruleService = require('./rule.service');
 const pageTemplateService = require('../template/page-template.service');
 const activityModel = require('../../models/activity.model');
+const faqModel = require('../../models/faq.model');
 const lmsRouteModel = require('../../models/lmsRoute.model');
 const aiResponseCacheModel = require('../../models/aiResponseCache.model');
 const chunkModel = require('../../models/chunk.model');
@@ -680,15 +681,16 @@ function detailImage(...segments) {
 
 const ENTRY_POINT_IMAGE = detailImage('ENTRY POINT.png');
 
-// [v0.9.13] Tambahkan field `video: 'https://...'` pada entri mana pun untuk
-// memunculkan tombol "Tonton Video" (YouTube watch/youtu.be/embed atau file .mp4).
-// Tanpa `video`, tombol video tidak muncul (hanya carousel gambar statis).
+// [v0.9.90] Video panduan TIDAK lagi diisi satu per satu. Semua entri otomatis dapat
+// `video: '/VIDEOS/<key>.mp4'` (lihat normalisasi di bawah object ini), jadi guru cukup
+// menaruh file baru di FE/public/VIDEOS/ tanpa mengubah kode. Modal panduan di FE punya
+// switch Gambar/Video; switch itu disembunyikan otomatis kalau file videonya belum ada.
+// Isi `video` manual (mis. URL YouTube) tetap dihormati dan menimpa konvensi nama file.
 const STATIC_TUTORIALS = {
   login: {
     key: 'login',
     title: 'Cara Login ke VClass',
     shortTitle: 'Login VClass',
-    video: '', // ← isi URL video tutorial login bila ada
     intent: 'bantuan_login',
     intro: 'Tutorial ini menjelaskan langkah dasar untuk masuk ke akun VClass.',
     note: 'Catatan: gambar bisa kamu ganti/update manual sesuai screenshot VClass terbaru.',
@@ -944,6 +946,22 @@ const STATIC_TUTORIALS = {
   }
 };
 
+// Konvensi nama file video panduan: FE/public/VIDEOS/<key>.mp4.
+Object.keys(STATIC_TUTORIALS).forEach((key) => {
+  if (!STATIC_TUTORIALS[key].video) STATIC_TUTORIALS[key].video = publicAssetPath('VIDEOS', `${key}.mp4`);
+});
+
+// [v0.9.90] Daftar SEMUA aset panduan (gambar + video) untuk di-prefetch FE saat workspace
+// dibuka, supaya modal panduan tidak loading lagi saat diklik siswa.
+function getTutorialAssets() {
+  return Object.keys(STATIC_TUTORIALS).map((key) => ({
+    key,
+    title: STATIC_TUTORIALS[key].title,
+    video: STATIC_TUTORIALS[key].video || '',
+    images: (STATIC_TUTORIALS[key].steps || []).map((s) => s.image).filter(Boolean)
+  }));
+}
+
 // Deteksi pertanyaan yang jelas "cara/langkah" (prosedural) — bukan pengecekan status.
 // Tujuannya: "saya udah ngerjain tugas, cara ngumpulinnya gimana?" harus masuk
 // tutorial (bantuan_tugas), bukan "cek tugas belum selesai".
@@ -1198,6 +1216,34 @@ function findMatchingActivity(activities = [], message = '') {
   return bestScore >= 60 ? best : null;
 }
 
+// [v0.9.90] Cari FAQ yang pertanyaannya cocok dengan pesan siswa.
+// Dipakai untuk MENDAHULUKAN jawaban FAQ di atas panduan bergambar: contoh pertanyaan FAQ
+// seperti "Virtual Class bisa login kapan saja?" mengandung kata "login", sehingga
+// resolveStaticTutorialKey() salah memilih tutorial login padahal siswa minta isi FAQ-nya.
+function findMatchingFaq(faqs = [], message = '') {
+  const text = normalizeText(message);
+  if (!Array.isArray(faqs) || text.length < 8) return null;
+
+  let best = null;
+  let bestScore = 0;
+  faqs.forEach((faq) => {
+    const question = normalizeText(faq.question || '');
+    if (!question || question.length < 8 || !String(faq.answer || '').trim()) return;
+
+    // Cocok persis / salah satu memuat yang lain (panjang cukup agar tak asal cocok).
+    let score = 0;
+    if (text === question || (text.length >= 12 && (text.includes(question) || question.includes(text)))) {
+      score = 100;
+    } else {
+      const words = question.split(/\s+/).filter((w) => w.length >= 4);
+      if (words.length) score = (words.filter((w) => text.includes(w)).length / words.length) * 100;
+    }
+    if (score > bestScore) { bestScore = score; best = faq; }
+  });
+
+  return bestScore >= 70 ? best : null;
+}
+
 function buildActivityInfoText(activity = {}) {
   const parts = [`📌 **${String(activity.title || 'Tugas ini').trim()}**`];
   if (activity.instruction) parts.push(String(activity.instruction).trim());
@@ -1225,11 +1271,8 @@ function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', e
       `Silakan klik tombol di bawah ini untuk membuka langkah-langkahnya dalam bentuk carousel. ` +
       `Gambarnya bisa diklik supaya tampil lebih besar.`;
 
-  // [v0.9.13] Opsi video tutorial — hanya muncul jika tutorial punya `video` (URL).
-  const videoAction = tutorial.video
-    ? [{ type: 'video_tutorial', label: `Tonton Video: ${tutorial.shortTitle || tutorial.title}`, url: tutorial.video, title: tutorial.title }]
-    : [];
-
+  // [v0.9.90] Tombol "Tonton Video" terpisah DIHAPUS — modal panduan sekarang punya
+  // switch Gambar/Video di dalamnya, jadi satu tombol saja sudah cukup.
   return {
     message,
     actions: [
@@ -1238,7 +1281,6 @@ function buildStaticTutorialChatResponse({ studentName = '', tutorialKey = '', e
         label: `Lihat Tutorial ${tutorial.shortTitle || tutorial.title}`,
         payload
       },
-      ...videoAction,
       {
         type: 'ask_ai',
         label: 'Tanya AI',
@@ -3183,6 +3225,45 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
     const hasMateriMention = mention?.type === 'materi' && (mention.documentId || mention.title || mention.sourceUrl || mention.url || mention.label);
     const staticTutorialKey = resolveStaticTutorialKey(detectedIntent, effectiveMessage);
     if (staticTutorialKey && !hasMateriMention) {
+      // [v0.9.90] FAQ MENANG atas panduan bergambar. Pertanyaan FAQ buatan guru sering
+      // memuat kata kunci tutorial ("login", "nilai", "tugas") sehingga sebelumnya langsung
+      // dibalas carousel panduan — isi FAQ-nya tak pernah muncul. Sekarang: jawab FAQ dulu,
+      // panduan bergambar tetap ditawarkan sebagai tombol pelengkap sesuai intent.
+      let matchedFaq = null;
+      try {
+        matchedFaq = findMatchingFaq(await faqModel.findByProjectId(projectId), effectiveMessage);
+      } catch (e) { console.warn('[Chat] Gagal cek FAQ sebelum tutorial:', e.message); }
+
+      if (matchedFaq) {
+        const tut = STATIC_TUTORIALS[staticTutorialKey];
+        const faqText = addStudentGreeting(String(matchedFaq.answer).trim(), studentName);
+        const faqActions = [];
+
+        if (tut) {
+          const payload = cloneStaticTutorial(tut);
+          payload.original_message = effectiveMessage;
+          faqActions.push({
+            type: 'static_tutorial_carousel',
+            label: `Lihat Panduan Bergambar: ${tut.shortTitle || tut.title}`,
+            payload
+          });
+        }
+        faqActions.push({ type: 'system_feedback_ok', label: 'Sudah jelas' });
+
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
+        await chatModel.createMessage({
+          session_id: sessionId, role: 'assistant', message: faqText, intent: detectedIntent,
+          context_used: { response_source: 'system', actions: faqActions, used_model: 'faq_direct', static_tutorial_key: staticTutorialKey }
+        });
+
+        return {
+          intent: detectedIntent, response_source: 'system',
+          ai_usage: aiRateLimitService.getStatus(sessionId),
+          is_locked: safetyState.locked, warnings: safetyState.warnings,
+          botMessage: { message: faqText, actions: faqActions }
+        };
+      }
+
       // [v0.9.9] Kalau user menyebut tugas/aktivitas spesifik & ada instruksinya di KB,
       // sisipkan info tugas itu (instruksi+tenggat) SEBELUM tutorial visual.
       let activityInfo = '';
@@ -3229,7 +3310,6 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
               label: `Lihat Panduan Bergambar: ${tut.shortTitle || tut.title}`,
               payload: cloneStaticTutorial(tut)
             },
-            ...(tut.video ? [{ type: 'video_tutorial', label: `Tonton Video: ${tut.shortTitle || tut.title}`, url: tut.video, title: tut.title }] : []),
             { type: 'system_feedback_ok', label: 'Sudah jelas' }
           ];
 
@@ -4020,4 +4100,6 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
 
 chatService._parseQuizJSON = parseQuizJSON; // ponytail: diekspos untuk self-check parser
 chatService._parseQuizCount = parseQuizCount;
+chatService._findMatchingFaq = findMatchingFaq; // ponytail: diekspos untuk self-check FAQ-first
+chatService.getTutorialAssets = getTutorialAssets;
 module.exports = chatService;

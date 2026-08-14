@@ -90,6 +90,18 @@ const externalLoaderService = {
 
   if (document.getElementById('alb-external-launcher')) return;
 
+  // [v0.9.90] Posisi tombol dipilih siswa (4 pojok) & disimpan per-browser.
+  var ALB_CORNER_KEY = 'alb_launcher_corner';
+  var ALB_CORNERS = ['br', 'bl', 'tr', 'tl'];
+  var ALB_IDLE_MS = 10000;
+
+  function readCorner() {
+    try {
+      var saved = localStorage.getItem(ALB_CORNER_KEY);
+      return ALB_CORNERS.indexOf(saved) !== -1 ? saved : 'br';
+    } catch (e) { return 'br'; }
+  }
+
   function getCourseIdFromUrl(url) {
     try {
       var parsed = new URL(url || window.location.href, window.location.href);
@@ -156,15 +168,29 @@ const externalLoaderService = {
     var style = document.createElement('style');
     style.id = 'alb-external-launcher-style';
     style.innerHTML = [
-      '.alb-ext-launcher-btn {',
+      // Wrapper memegang POSISI (4 pojok) + peredupan idle. Tombol sendiri tinggal
+      // urusan tampilan, jadi pindah pojok cukup ganti 1 class di wrapper.
+      '.alb-ext-wrap {',
       '  position: fixed;',
-      // [v0.9.9] Digeser ke kiri dari pojok kanan (24px → 96px) agar tidak menimpa
-      // widget bawaan LMS yang juga ada di pojok kanan bawah.
-      '  right: 96px;',
-      // [v0.9.25] Dinaikkan sedikit (24→34px) agar sejajar dengan tombol bundar bawaan
-      // LMS (accessibility / back-to-top) di pojok kanan bawah.
-      '  bottom: 25px;',
       '  z-index: 999999;',
+      '  display: flex;',
+      '  flex-direction: column;',
+      '  gap: 8px;',
+      '  opacity: 1;',
+      '  transition: opacity 0.45s ease;',
+      '  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
+      '}',
+      // [v0.9.90] Idle 10 detik → redup 50% supaya tak mengganggu halaman LMS.
+      '.alb-ext-wrap.alb-ext-idle { opacity: 0.5; }',
+      // [v0.9.9] Pojok kanan bawah digeser ke kiri (24px → 96px) & dinaikkan (24 → 25px)
+      // agar tidak menimpa tombol bundar bawaan LMS di pojok yang sama.
+      '.alb-ext-wrap.alb-ext-br { right: 96px; bottom: 25px; align-items: flex-end; }',
+      '.alb-ext-wrap.alb-ext-bl { left: 24px; bottom: 25px; align-items: flex-start; }',
+      // Pojok atas: menu pemilih pojok harus muncul DI BAWAH tombol, bukan keluar layar.
+      '.alb-ext-wrap.alb-ext-tr { right: 24px; top: 24px; align-items: flex-end; flex-direction: column-reverse; }',
+      '.alb-ext-wrap.alb-ext-tl { left: 24px; top: 24px; align-items: flex-start; flex-direction: column-reverse; }',
+      '.alb-ext-launcher-btn {',
+      '  position: relative;', // jangkar untuk grip mode ikon-saja
       '  border: none;',
       '  border-radius: 9999px;',
       '  background: ' + primaryColor + ';',
@@ -174,15 +200,60 @@ const externalLoaderService = {
       '  font-size: 15px;',
       '  font-weight: 600;',
       '  box-shadow: 0 4px 16px rgba(0,0,0,0.14);',
-      '  transition: all 0.2s ease;',
+      '  transition: transform 0.2s ease, box-shadow 0.2s ease;',
       '  display: flex;',
       '  align-items: center;',
       '  gap: 8px;',
-      '  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
+      '  font-family: inherit;',
       '}',
       '.alb-ext-launcher-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.18); }',
       '.alb-ext-launcher-btn:disabled { opacity: 0.72; cursor: not-allowed; transform: none; }',
-      '@media (max-width: 640px) { .alb-ext-launcher-btn { right: 84px; bottom: 29px; padding: 11px 16px; font-size: 14px; } }'
+      // Mode "ikon saja" (switch guru di Widget Config) → tombol jadi bundar.
+      '.alb-ext-launcher-btn.alb-ext-icon-only { padding: 0; width: 48px; height: 48px; justify-content: center; }',
+      '.alb-ext-launcher-btn.alb-ext-icon-only .alb-ext-label { display: none; }',
+      // Pegangan kecil di dalam tombol: klik → menu pilih pojok.
+      '.alb-ext-grip {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  justify-content: center;',
+      '  width: 20px;',
+      '  height: 20px;',
+      '  margin-right: 2px;',
+      '  border-radius: 6px;',
+      '  font-size: 10px;',
+      '  opacity: 0.65;',
+      '  background: rgba(255,255,255,0.16);',
+      '}',
+      '.alb-ext-grip:hover { opacity: 1; background: rgba(255,255,255,0.3); }',
+      '.alb-ext-launcher-btn.alb-ext-icon-only .alb-ext-grip { position: absolute; margin: 0; transform: translate(18px, -18px); background: ' + primaryColor + '; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }',
+      '.alb-ext-corner-menu {',
+      '  display: grid;',
+      '  grid-template-columns: repeat(2, 1fr);',
+      '  gap: 6px;',
+      '  padding: 8px;',
+      '  background: #ffffff;',
+      '  border: 1px solid #e7e5e4;',
+      '  border-radius: 12px;',
+      '  box-shadow: 0 8px 24px rgba(0,0,0,0.18);',
+      '}',
+      '.alb-ext-corner-menu.alb-ext-hidden { display: none; }',
+      '.alb-ext-corner-menu-title { grid-column: 1 / -1; font-size: 11px; font-weight: 700; color: #78716c; text-align: center; }',
+      '.alb-ext-corner-btn {',
+      '  width: 34px; height: 34px;',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  border: 1px solid #e7e5e4;',
+      '  border-radius: 8px;',
+      '  background: #fafaf9;',
+      '  color: #44403c;',
+      '  font-size: 13px;',
+      '  cursor: pointer;',
+      '}',
+      '.alb-ext-corner-btn:hover { background: #f0efed; }',
+      '.alb-ext-corner-btn.alb-ext-corner-active { background: ' + primaryColor + '; color: ' + buttonTextColor + '; border-color: ' + primaryColor + '; }',
+      '@media (max-width: 640px) {',
+      '  .alb-ext-wrap.alb-ext-br { right: 84px; bottom: 29px; }',
+      '  .alb-ext-launcher-btn { padding: 11px 16px; font-size: 14px; }',
+      '}'
     ].join('\\n');
 
     document.head.appendChild(style);
@@ -195,11 +266,79 @@ const externalLoaderService = {
     if (typeof btnTheme === 'string') { try { btnTheme = JSON.parse(btnTheme); } catch (e) { btnTheme = {}; } }
     var launcherText = (btnTheme.title && String(btnTheme.title).trim()) ? String(btnTheme.title).trim() : 'Tanya AI';
     var safeLauncherText = launcherText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // [v0.9.90] Switch guru: tampilkan teks + ikon, atau cukup ikon saja.
+    var iconOnly = btnTheme.iconOnly === true;
+
+    var GRIP_HTML = '<span class="alb-ext-grip" title="Pindahkan tombol"><i class="fa-solid fa-grip-vertical"></i></span>';
+    var IDLE_HTML = GRIP_HTML + '<i class="fa-solid fa-sparkles"></i><span class="alb-ext-label">' + safeLauncherText + '</span>';
+
+    var wrap = document.createElement('div');
+    wrap.id = 'alb-external-launcher-wrap';
+    wrap.className = 'alb-ext-wrap alb-ext-' + readCorner();
+
+    // Menu 4 pojok. Panah diagonal FA6 hanya ada di versi Pro, jadi pakai fa-arrow-up
+    // yang diputar — hasil visualnya sama dan tetap jalan di Font Awesome Free.
+    var menu = document.createElement('div');
+    menu.id = 'alb-ext-corner-menu';
+    menu.className = 'alb-ext-corner-menu alb-ext-hidden';
+    menu.innerHTML = '<div class="alb-ext-corner-menu-title">Pindah ke pojok</div>' + [
+      { c: 'tl', deg: -45, t: 'Kiri atas' },
+      { c: 'tr', deg: 45, t: 'Kanan atas' },
+      { c: 'bl', deg: -135, t: 'Kiri bawah' },
+      { c: 'br', deg: 135, t: 'Kanan bawah' }
+    ].map(function (o) {
+      return '<button type="button" class="alb-ext-corner-btn" data-corner="' + o.c + '" title="' + o.t + '">'
+        + '<i class="fa-solid fa-arrow-up" style="transform:rotate(' + o.deg + 'deg);"></i></button>';
+    }).join('');
 
     var btn = document.createElement('button');
     btn.id = 'alb-external-launcher';
-    btn.className = 'alb-ext-launcher-btn';
-    btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> ' + safeLauncherText;
+    btn.className = 'alb-ext-launcher-btn' + (iconOnly ? ' alb-ext-icon-only' : '');
+    btn.innerHTML = IDLE_HTML;
+
+    wrap.appendChild(menu);
+    wrap.appendChild(btn);
+
+    // ---- Peredupan idle: 10 detik setelah halaman siap, tombol jadi 50% ----------
+    var idleTimer = null;
+    function armIdle() {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () { wrap.classList.add('alb-ext-idle'); }, ALB_IDLE_MS);
+    }
+    function wake() {
+      wrap.classList.remove('alb-ext-idle');
+      armIdle();
+    }
+    function isIdle() { return wrap.classList.contains('alb-ext-idle'); }
+
+    function toggleCornerMenu(show) {
+      menu.classList.toggle('alb-ext-hidden', !show);
+      if (show) clearTimeout(idleTimer); else armIdle();
+    }
+
+    function applyCorner(corner) {
+      ALB_CORNERS.forEach(function (c) { wrap.classList.remove('alb-ext-' + c); });
+      wrap.classList.add('alb-ext-' + corner);
+      try { localStorage.setItem(ALB_CORNER_KEY, corner); } catch (e) {}
+      Array.prototype.forEach.call(menu.querySelectorAll('.alb-ext-corner-btn'), function (b) {
+        b.classList.toggle('alb-ext-corner-active', b.getAttribute('data-corner') === corner);
+      });
+    }
+    applyCorner(readCorner());
+
+    menu.addEventListener('click', function (e) {
+      var target = e.target.closest ? e.target.closest('.alb-ext-corner-btn') : null;
+      if (!target) return;
+      e.stopPropagation();
+      applyCorner(target.getAttribute('data-corner'));
+      toggleCornerMenu(false);
+      wake();
+    });
+
+    // Klik di luar → tutup menu pojok.
+    document.addEventListener('click', function (e) {
+      if (!wrap.contains(e.target)) toggleCornerMenu(false);
+    });
 
     function extractMoodleContext() {
       var ctx = {
@@ -393,12 +532,25 @@ const externalLoaderService = {
       window.open(targetUrl, 'alb_ai_workspace');
     }
 
-    btn.onclick = function() {
-      btn.innerHTML = '<span style="font-size:18px;display:inline-block;animation:spin 1s linear infinite;">&#8635;</span><style>@keyframes spin { 100% { transform:rotate(360deg); } }</style>';
+    btn.onclick = function(event) {
+      // Klik pada pegangan = buka menu pojok, bukan buka AI Buddy.
+      if (event && event.target.closest && event.target.closest('.alb-ext-grip')) {
+        event.stopPropagation();
+        wake();
+        toggleCornerMenu(menu.classList.contains('alb-ext-hidden'));
+        return;
+      }
+
+      // Klik pertama saat tombol sedang redup hanya "membangunkan" tombol, supaya
+      // klik tak sengaja di halaman LMS tidak langsung membuka tab baru.
+      if (isIdle()) { wake(); return; }
+      wake();
+
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>' + (iconOnly ? '' : '<span class="alb-ext-label">Membuka…</span>');
       btn.disabled = true;
 
       var resetBtn = function() {
-        btn.innerHTML = '<i class="fa-solid fa-sparkles"></i> ' + safeLauncherText;
+        btn.innerHTML = IDLE_HTML;
         btn.disabled = false;
       };
 
@@ -438,7 +590,11 @@ const externalLoaderService = {
         });
     };
 
-    document.body.appendChild(btn);
+    document.body.appendChild(wrap);
+
+    // Hitung mundur peredupan mulai saat DOM halaman LMS siap.
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', armIdle);
+    else armIdle();
   }
 
   fetchWithTimeout(apiBase + '/api/widget/config/' + encodeURIComponent(projectKey) + '?t=' + Date.now(), { cache: 'no-store' }, ALB_REQUEST_TIMEOUT_MS, 'Load konfigurasi widget')

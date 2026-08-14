@@ -10,6 +10,8 @@ const studentSessionRegistryModel = require('../models/studentSessionRegistry.mo
 const lmsContextService = require('../services/moodle/lms-context.service');
 const documentModel = require('../models/document.model');
 const moodleService = require('../services/moodle/moodle.service');
+const moodleSyncGate = require('../services/moodle/moodle-sync-gate.service');
+const studentProgressModel = require('../models/studentContentProgress.model');
 const gradeUtil = require('../services/moodle/grade-util');
 const lmsRouteModel = require('../models/lmsRoute.model');
 const moodleConfigModel = require('../models/moodleConfig.model');
@@ -289,6 +291,63 @@ const chatController = {
     }, 200);
   }),
 
+  // [v0.9.85] Sinkronisasi Moodle dipicu SIAPA SAJA saat klik widget "Tanya AI" (bukan cuma
+  // guru dari dashboard — itu kini opsi cadangan). Dua jalur, cek TTL 24 jam:
+  //  • Track 1 (global): konten course/materi. TTL di DB per course (lms_course_routes).
+  //  • Track 2 (personal): kemajuan siswa. TTL di baris siswa sendiri (student_content_progress).
+  // Dipanggil FE secara fire-and-forget setelah sesi siap; koneksi browser menjaga request
+  // tetap hidup hingga sync selesai (aman di serverless). Selalu balas 200 (non-blocking).
+  ensureMoodleSync: asyncHandler(async (req, res) => {
+    const { sessionId } = req.body;
+    if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+
+    const session = await chatModel.getSessionById(sessionId);
+    if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
+
+    const projectId = session.project_id;
+    const pageCtx = session.page_context || {};
+    const meta = pageCtx.session_meta || {};
+    const courseCtx = session.course_context || {};
+    const classCode = lmsContextService.getClassCodeFromSession(session);
+
+    let courseId = meta.course_id || courseCtx.course_id || pageCtx.course_id || null;
+    if (!courseId && classCode) {
+      try {
+        const route = await lmsRouteModel.findCourseRoute(projectId, classCode);
+        courseId = route?.course_id || null;
+      } catch (_) { /* abaikan */ }
+    }
+    if (!courseId || !classCode) {
+      return response.success(res, 'Course belum terdeteksi — sinkron dilewati', {
+        global: { ran: false, reason: 'no_course' },
+        personal: { ran: false, reason: 'no_course' }
+      }, 200);
+    }
+
+    // TRACK 1 — konten global (shared). Siapa pun trigger; TTL di DB per course.
+    let global = { ran: false, reason: 'skip' };
+    try {
+      global = await moodleSyncGate.ensureCourseContentFresh(projectId, classCode, courseId);
+    } catch (e) {
+      console.warn('[EnsureSync] global gagal:', e.message);
+      global = { ran: false, reason: 'error', error: e.message };
+    }
+
+    // TRACK 2 — kemajuan personal (per siswa). Butuh identitas siswa (userId email-resolved).
+    let personal = { ran: false, reason: 'no_identity' };
+    try {
+      const uid = await resolveStudentUserId(projectId, meta, courseId);
+      if (uid.userId) {
+        personal = await moodleSyncGate.ensureStudentProgressFresh(projectId, uid.userId, courseId);
+      }
+    } catch (e) {
+      console.warn('[EnsureSync] personal gagal:', e.message);
+      personal = { ran: false, reason: 'error', error: e.message };
+    }
+
+    return response.success(res, 'Sinkronisasi Moodle diperiksa', { global, personal }, 200);
+  }),
+
   sendMessage: asyncHandler(async (req, res) => {
     // 1. Tangkap seluruh parameter baru dari Frontend payload
     const { sessionId, message, pageContext, elementContext, expectedSourceType, forceAI, forceFAQ, responseMode, intent, mention, freshMention } = req.body;
@@ -503,13 +562,32 @@ const chatController = {
     const moodleUserId = _resolvedUid.userId || null;
     const completionByCmid = new Map();
     let completionTotal = 0; let completionDone = 0;
+    let completionSource = 'none';
     if (moodleUserId) {
+      // [v0.9.85 Track 2] Utamakan cache kemajuan per-siswa (DB) selama masih segar (TTL 24 jam)
+      // → hemat panggilan Moodle live tiap buka "@materi". Cache diisi lewat /chat/ensure-moodle-sync
+      // saat siswa klik widget. Map cache hanya berisi cmid yang SUDAH selesai (yang lain =
+      // tidak ada di map = belum selesai), setara perilaku live untuk isCompleted & lock.
       try {
-        const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, moodleUserId);
-        const statuses = Array.isArray(compRes?.statuses) ? compRes.statuses : [];
-        completionTotal = statuses.length;
-        statuses.forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
-      } catch (e) { console.warn('[SessionMaterials] completion gagal:', e.message); }
+        const cached = await studentProgressModel.find(projectId, moodleUserId, courseId);
+        if (cached && !moodleSyncGate.isStale(cached.last_synced_at) && Array.isArray(cached.completed_cmids)) {
+          cached.completed_cmids.forEach((cmid) => {
+            completionByCmid.set(Number(cmid), { cmid: Number(cmid), state: 1, isoverallcomplete: true });
+          });
+          completionTotal = Number(cached.completion_total || cached.completed_cmids.length);
+          completionSource = 'cache';
+        }
+      } catch (e) { console.warn('[SessionMaterials] baca cache progress gagal:', e.message); }
+
+      if (completionSource !== 'cache') {
+        try {
+          const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, moodleUserId);
+          const statuses = Array.isArray(compRes?.statuses) ? compRes.statuses : [];
+          completionTotal = statuses.length;
+          statuses.forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
+          completionSource = 'live';
+        } catch (e) { console.warn('[SessionMaterials] completion gagal:', e.message); }
+      }
     }
     const isCompleted = (st) => Boolean(st) && (st.isoverallcomplete === true || [1, 2, 3].includes(Number(st.state)));
 
@@ -564,7 +642,7 @@ const chatController = {
       courseId, domUserId: meta.moodle_user_id || null, email: meta.email || null,
       finalUserId: moodleUserId, userIdSource: _resolvedUid.source,
       sections: Array.isArray(sections) ? sections.length : 0,
-      completionTotal, completionDone, materialsReturned: materials.length, lockedCount
+      completionSource, completionTotal, completionDone, materialsReturned: materials.length, lockedCount
     }));
     return response.success(res, 'Materi kelas berhasil diambil', materials, 200);
   }),
@@ -954,6 +1032,11 @@ const chatController = {
     if (!session) return response.error(res, 'Sesi chat tidak ditemukan', null, 404);
 
     return response.success(res, 'Session berhasil diambil', { session }, 200);
+  }),
+
+  // [v0.9.90] Daftar aset panduan (gambar + video) untuk di-prefetch FE saat workspace dibuka.
+  getTutorialAssets: asyncHandler(async (req, res) => {
+    return response.success(res, 'Tutorial assets retrieved', chatService.getTutorialAssets(), 200);
   }),
 
   getSuggestions: asyncHandler(async (req, res) => {

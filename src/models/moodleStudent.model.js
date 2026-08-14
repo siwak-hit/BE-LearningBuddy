@@ -26,6 +26,27 @@ const moodleStudentModel = {
     return inserted;
   },
 
+  // [v0.9.85] Ganti isi direktori HANYA untuk SATU course (delete course itu lalu insert).
+  // Dipakai saat sinkron dipicu siswa (klik widget) — cuma menyegarkan kelas siswa itu tanpa
+  // menghapus baris course lain (beda dgn replaceForProject yang wipe seluruh project).
+  async replaceForCourse(projectId, courseId, rows = []) {
+    if (!projectId || !courseId) return 0;
+    const del = await supabaseAdmin
+      .from(TABLE).delete().eq('project_id', projectId).eq('course_id', Number(courseId));
+    if (del.error) throw del.error;
+    if (!rows.length) return 0;
+
+    const BATCH = 500;
+    let inserted = 0;
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const slice = rows.slice(i, i + BATCH);
+      const { error } = await supabaseAdmin.from(TABLE).insert(slice);
+      if (error) throw error;
+      inserted += slice.length;
+    }
+    return inserted;
+  },
+
   // Apakah direktori project ini sudah terisi (sudah pernah sinkron)?
   async existsForProject(projectId) {
     if (!projectId) return false;

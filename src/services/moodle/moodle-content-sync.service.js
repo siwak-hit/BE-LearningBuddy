@@ -624,6 +624,39 @@ const moodleContentSyncService = {
     return { courses: entries.length, coursesOk, students: stored, withEmail, partial: false, replaced: true };
   },
 
+  // [v0.9.85] Segarkan direktori siswa HANYA untuk satu course (dipicu siswa saat klik widget,
+  // bagian dari Track 1 global). Ringan: 1 panggilan getEnrolledUsers → replaceForCourse. Tidak
+  // menyentuh course lain. Berbeda dari syncStudentDirectory (admin, semua course sekaligus).
+  async syncCourseStudentDirectory(projectId, classCode, courseId) {
+    if (!projectId || !courseId) return { students: 0, withEmail: 0 };
+    const cls = String(classCode || '').toUpperCase();
+    let users = [];
+    try { users = await moodleService.getEnrolledUsers(projectId, Number(courseId)); }
+    catch (e) { console.warn('[CourseDir] getEnrolledUsers gagal:', e.message); return { students: 0, withEmail: 0, error: e.message }; }
+
+    const rows = (Array.isArray(users) ? users : []).map((u) => {
+      const roles = Array.isArray(u.roles) ? u.roles : [];
+      const isStudent = !roles.length || roles.some((r) => /student|siswa/i.test(String(r.shortname || r.name || '')));
+      if (!isStudent || !u.id) return null;
+      return {
+        project_id: projectId,
+        course_id: Number(courseId),
+        class_code: cls,
+        moodle_user_id: u.id,
+        email: String(u.email || '').trim().toLowerCase() || null,
+        username: String(u.username || '').trim().toLowerCase() || null,
+        fullname: u.fullname || [u.firstname, u.lastname].filter(Boolean).join(' ').trim() || null,
+        idnumber: String(u.idnumber || '').trim().toLowerCase() || null
+      };
+    }).filter(Boolean);
+
+    const withEmail = rows.filter((r) => r.email).length;
+    let stored = 0;
+    try { stored = await moodleStudentModel.replaceForCourse(projectId, courseId, rows); }
+    catch (e) { console.warn('[CourseDir] simpan direktori course gagal:', e.message); }
+    return { students: stored, withEmail };
+  },
+
   async syncAllCourses(projectId, options = {}) {
     const config = await moodleService.getConfig(projectId);
     let courseMap = config.course_map || {};

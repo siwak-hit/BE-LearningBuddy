@@ -24,7 +24,9 @@ router.get('/student-courses/:sessionId', chatController.getStudentCourses); // 
 router.get('/ai-usage/:sessionId', chatController.getAiUsage);
 router.post('/unlock', chatController.unlockChat);
 router.get('/state/:sessionId', chatController.getSessionState);
+router.post('/ensure-moodle-sync', chatController.ensureMoodleSync); // [v0.9.85] sinkron 2-jalur dipicu siswa saat klik widget
 router.get('/suggestions', chatController.getSuggestions);
+router.get('/tutorial-assets', chatController.getTutorialAssets); // [v0.9.90] prefetch gambar+video panduan
 router.patch('/session/:sessionId/profile', chatController.updateProfile);
 router.patch('/session/:sessionId/context', chatController.updateSessionContext);
 
