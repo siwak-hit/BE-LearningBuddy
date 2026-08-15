@@ -92,6 +92,7 @@ const externalLoaderService = {
 
   // [v0.9.90] Posisi tombol dipilih siswa (4 pojok) & disimpan per-browser.
   var ALB_CORNER_KEY = 'alb_launcher_corner';
+  var ALB_HIDDEN_KEY = 'alb_launcher_hidden';
   var ALB_CORNERS = ['br', 'bl', 'tr', 'tl'];
   var ALB_IDLE_MS = 10000;
 
@@ -250,89 +251,15 @@ const externalLoaderService = {
       '}',
       '.alb-ext-corner-btn:hover { background: #f0efed; }',
       '.alb-ext-corner-btn.alb-ext-corner-active { background: ' + primaryColor + '; color: ' + buttonTextColor + '; border-color: ' + primaryColor + '; }',
-      // ---- [v0.9.91] Panel pilihan cara membuka -------------------------------
-      '.alb-ext-choice-menu {',
-      '  display: flex; flex-direction: column; gap: 6px;',
-      '  width: 268px; max-width: calc(100vw - 32px);',
-      '  padding: 10px;',
-      '  background: #ffffff; border: 1px solid #e7e5e4; border-radius: 14px;',
-      '  box-shadow: 0 12px 32px rgba(0,0,0,0.2);',
+      // [v0.9.92] Tombol sembunyikan: melebar 2 kolom, jelas beda dari pilihan pojok.
+      '.alb-ext-hide-btn { grid-column: 1 / -1; width: 100%; }',
+      // Mode sembunyi: tinggal ikon mata samar. Tetap bisa diklik untuk memunculkan lagi.
+      '.alb-ext-wrap.alb-ext-hiddenmode .alb-ext-launcher-btn {',
+      '  opacity: 0.3;',
+      '  padding: 0; width: 40px; height: 40px; justify-content: center;',
+      '  box-shadow: none;',
       '}',
-      '.alb-ext-choice-menu.alb-ext-hidden { display: none; }',
-      '.alb-ext-choice-title { font-size: 11px; font-weight: 800; color: #78716c; text-transform: uppercase; letter-spacing: .04em; padding: 2px 4px 4px; }',
-      '.alb-ext-choice-btn {',
-      '  display: flex; align-items: center; gap: 10px; text-align: left;',
-      '  padding: 9px 10px; border: 1px solid #e7e5e4; border-radius: 10px;',
-      '  background: #fafaf9; cursor: pointer; font-family: inherit; width: 100%;',
-      '}',
-      '.alb-ext-choice-btn:hover { background: #f0efed; border-color: ' + primaryColor + '; }',
-      '.alb-ext-choice-ico {',
-      '  width: 32px; height: 32px; flex: 0 0 32px; border-radius: 8px;',
-      '  display: flex; align-items: center; justify-content: center;',
-      '  background: ' + primaryColor + '; color: ' + buttonTextColor + '; font-size: 13px;',
-      '}',
-      '.alb-ext-choice-txt { display: flex; flex-direction: column; min-width: 0; }',
-      '.alb-ext-choice-txt b { font-size: 13.5px; color: #0c0a09; line-height: 1.3; }',
-      '.alb-ext-choice-txt small { font-size: 11px; color: #78716c; line-height: 1.35; margin-top: 1px; }',
-
-      // ---- Panel chat inline --------------------------------------------------
-      '.alb-inline-panel {',
-      '  position: fixed; right: 24px; bottom: 88px; z-index: 2147483000;',
-      '  width: 340px; max-width: calc(100vw - 24px); height: 460px; max-height: calc(100vh - 120px);',
-      '  display: flex; flex-direction: column; overflow: hidden;',
-      '  background: #ffffff; border: 1px solid #e7e5e4; border-radius: 16px;',
-      '  box-shadow: 0 16px 48px rgba(0,0,0,0.24);',
-      '  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
-      '}',
-      '.alb-inline-panel.alb-ext-hidden { display: none; }',
-      '.alb-inline-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #f0efed; }',
-      '.alb-inline-head-txt { display: flex; flex-direction: column; min-width: 0; }',
-      '.alb-inline-head-txt b { font-size: 14px; color: #0c0a09; }',
-      '.alb-inline-head-txt small { font-size: 11px; color: #78716c; }',
-      '.alb-inline-close { width: 30px; height: 30px; flex: 0 0 30px; border: 1px solid #e7e5e4; border-radius: 999px; background: #fafaf9; color: #57534e; cursor: pointer; }',
-      '.alb-inline-note { display: flex; gap: 7px; padding: 9px 14px; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: 11px; line-height: 1.45; color: #92400e; }',
-      '.alb-inline-body { flex: 1; overflow-y: auto; padding: 12px 14px; background: #f8fafc; font-size: 13.5px; }',
-      // Gelembung polos: TANPA ikon user/robot, sesuai permintaan mode ringkas.
-      '.alb-inline-msg { margin-bottom: 9px; padding: 9px 12px; border-radius: 12px; line-height: 1.5; max-width: 88%; word-wrap: break-word; }',
-      '.alb-inline-bot { background: #ffffff; border: 1px solid #e7e5e4; color: #1c1917; }',
-      '.alb-inline-user { background: ' + primaryColor + '; color: ' + buttonTextColor + '; margin-left: auto; }',
-      '.alb-inline-typing { color: #78716c; font-style: italic; }',
-      '.alb-inline-tut-btn, .alb-inline-open-tab {',
-      '  display: inline-flex; align-items: center; gap: 6px; margin-top: 9px;',
-      '  padding: 7px 12px; border-radius: 999px; cursor: pointer; font-family: inherit;',
-      '  font-size: 12.5px; font-weight: 700;',
-      '  background: ' + primaryColor + '; color: ' + buttonTextColor + '; border: 0;',
-      '}',
-      '.alb-inline-form { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #f0efed; background: #fff; }',
-      '.alb-inline-input { flex: 1; min-width: 0; border: 1px solid #d6d3d1; border-radius: 999px; padding: 9px 14px; font-size: 13.5px; outline: none; font-family: inherit; }',
-      '.alb-inline-input:focus { border-color: ' + primaryColor + '; }',
-      '.alb-inline-send { width: 38px; height: 38px; flex: 0 0 38px; border: 0; border-radius: 999px; background: ' + primaryColor + '; color: ' + buttonTextColor + '; cursor: pointer; }',
-      '@media (max-width: 640px) { .alb-inline-panel { right: 8px; left: 8px; width: auto; bottom: 84px; height: 68vh; } }',
-
-      // ---- Modal panduan bergambar (z-index tertinggi, di atas apa pun milik LMS) ----
-      '.alb-tut-overlay {',
-      '  position: fixed; inset: 0; z-index: 2147483600;',
-      '  display: flex; align-items: center; justify-content: center; padding: 16px;',
-      '  background: rgba(2,6,23,0.78);',
-      '  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
-      '}',
-      '.alb-tut-overlay.alb-ext-hidden { display: none; }',
-      '.alb-tut-card { display: flex; flex-direction: column; width: 100%; max-width: 620px; height: min(86vh, 720px); background: #fff; border-radius: 16px; overflow: hidden; }',
-      '.alb-tut-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #f1f5f9; }',
-      '.alb-tut-title { font-size: 15px; font-weight: 800; color: #0f172a; }',
-      '.alb-tut-close { width: 32px; height: 32px; flex: 0 0 32px; border: 1px solid #e2e8f0; border-radius: 999px; background: #f8fafc; color: #475569; cursor: pointer; }',
-      '.alb-tut-imgwrap { flex: 3; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 12px; background: #f1f5f9; }',
-      '.alb-tut-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px; }',
-      '.alb-tut-txt { flex: 2; min-height: 0; overflow-y: auto; padding: 14px 18px; border-top: 1px solid #f1f5f9; }',
-      '.alb-tut-counter { display: inline-block; font-size: 11px; font-weight: 800; color: ' + primaryColor + '; background: #f1f5f9; padding: 3px 9px; border-radius: 999px; }',
-      '.alb-tut-step-title { margin: 8px 0 6px; font-size: 16px; font-weight: 800; color: #0f172a; }',
-      '.alb-tut-step-text { margin: 0; font-size: 14px; line-height: 1.6; color: #334155; }',
-      '.alb-tut-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-top: 1px solid #f1f5f9; }',
-      '.alb-tut-foot button { padding: 8px 16px; border-radius: 999px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }',
-      '.alb-tut-prev { border: 1px solid #e2e8f0; background: #fff; color: #334155; }',
-      '.alb-tut-prev:disabled { opacity: .35; cursor: not-allowed; }',
-      '.alb-tut-next { border: 0; background: ' + primaryColor + '; color: ' + buttonTextColor + '; }',
-
+      '.alb-ext-wrap.alb-ext-hiddenmode .alb-ext-launcher-btn:hover { opacity: 0.85; transform: none; }',
       '@media (max-width: 640px) {',
       '  .alb-ext-wrap.alb-ext-br { right: 84px; bottom: 29px; }',
       '  .alb-ext-launcher-btn { padding: 11px 16px; font-size: 14px; }',
@@ -372,24 +299,10 @@ const externalLoaderService = {
     ].map(function (o) {
       return '<button type="button" class="alb-ext-corner-btn" data-corner="' + o.c + '" title="' + o.t + '">'
         + '<i class="fa-solid fa-arrow-up" style="transform:rotate(' + o.deg + 'deg);"></i></button>';
-    }).join('');
-
-    // [v0.9.91] Panel pilihan cara membuka: tab baru (lengkap) atau chat di halaman ini
-    // (ringkas, panduan saja). Muncul saat tombol utama diklik.
-    var choiceMenu = document.createElement('div');
-    choiceMenu.id = 'alb-ext-choice-menu';
-    choiceMenu.className = 'alb-ext-choice-menu alb-ext-hidden';
-    choiceMenu.innerHTML = [
-      '<div class="alb-ext-choice-title">Mau dibuka di mana?</div>',
-      '<button type="button" class="alb-ext-choice-btn" data-choice="tab">',
-      '  <span class="alb-ext-choice-ico"><i class="fa-solid fa-arrow-up-right-from-square"></i></span>',
-      '  <span class="alb-ext-choice-txt"><b>Buka di tab baru</b><small>Lengkap: tanya materi, AI, nilai &amp; tugas</small></span>',
-      '</button>',
-      '<button type="button" class="alb-ext-choice-btn" data-choice="inline">',
-      '  <span class="alb-ext-choice-ico"><i class="fa-solid fa-comment-dots"></i></span>',
-      '  <span class="alb-ext-choice-txt"><b>Chat di halaman ini</b><small>Ringkas: panduan pakai VClass saja</small></span>',
-      '</button>'
-    ].join('');
+    }).join('')
+      // [v0.9.92] Sembunyikan tombol — melebar 2 kolom karena bukan pilihan pojok.
+      + '<button type="button" class="alb-ext-corner-btn alb-ext-hide-btn" data-hide="1" title="Sembunyikan tombol">'
+      + '<i class="fa-solid fa-eye-slash"></i></button>';
 
     var btn = document.createElement('button');
     btn.id = 'alb-external-launcher';
@@ -397,7 +310,6 @@ const externalLoaderService = {
     btn.innerHTML = IDLE_HTML;
 
     wrap.appendChild(menu);
-    wrap.appendChild(choiceMenu);
     wrap.appendChild(btn);
 
     // ---- Peredupan idle: 10 detik setelah halaman siap, tombol jadi 50% ----------
@@ -417,9 +329,20 @@ const externalLoaderService = {
       if (show) clearTimeout(idleTimer); else armIdle();
     }
 
-    function toggleChoiceMenu(show) {
-      choiceMenu.classList.toggle('alb-ext-hidden', !show);
-      if (show) clearTimeout(idleTimer); else armIdle();
+    // [v0.9.92] Mode sembunyi: tombol menyusut jadi ikon mata saja dengan opacity 30%,
+    // jadi tetap ada jalan kembali tanpa memuat ulang halaman. Pilihannya diingat
+    // per-browser supaya siswa tak perlu menyembunyikannya lagi tiap pindah halaman LMS.
+    function isHidden() { return wrap.classList.contains('alb-ext-hiddenmode'); }
+
+    function setHidden(on) {
+      wrap.classList.toggle('alb-ext-hiddenmode', on);
+      btn.innerHTML = on
+        ? '<i class="fa-solid fa-eye"></i>'
+        : IDLE_HTML;
+      btn.title = on ? 'Tampilkan lagi tombol AI Buddy' : '';
+      try { localStorage.setItem(ALB_HIDDEN_KEY, on ? '1' : '0'); } catch (e) {}
+      if (on) { clearTimeout(idleTimer); wrap.classList.remove('alb-ext-idle'); toggleCornerMenu(false); }
+      else armIdle();
     }
 
     function applyCorner(corner) {
@@ -436,6 +359,9 @@ const externalLoaderService = {
       var target = e.target.closest ? e.target.closest('.alb-ext-corner-btn') : null;
       if (!target) return;
       e.stopPropagation();
+
+      if (target.getAttribute('data-hide') === '1') { setHidden(true); return; }
+
       applyCorner(target.getAttribute('data-corner'));
       toggleCornerMenu(false);
       wake();
@@ -685,24 +611,6 @@ const externalLoaderService = {
       }
     }
 
-    // [v0.9.91] Klik tombol tidak lagi langsung membuka tab. Siswa memilih dulu:
-    // buka penuh di tab baru (AI + materi) atau chat ringkas di halaman ini (panduan saja).
-    choiceMenu.addEventListener('click', function(e) {
-      var target = e.target.closest ? e.target.closest('.alb-ext-choice-btn') : null;
-      if (!target) return;
-      e.stopPropagation();
-      var pick = target.getAttribute('data-choice');
-      toggleChoiceMenu(false);
-      wake();
-
-      setBtnLoading(true);
-      prepareSession().then(function(sessionId) {
-        setBtnLoading(false);
-        if (pick === 'inline') openInlinePanel(sessionId);
-        else openWorkspace(sessionId);
-      });
-    });
-
     btn.onclick = function(event) {
       // Klik pada pegangan = buka menu pojok, bukan membuka AI Buddy.
       if (event && event.target.closest && event.target.closest('.alb-ext-grip')) {
@@ -712,249 +620,30 @@ const externalLoaderService = {
         return;
       }
 
+      // Tombol sedang disembunyikan → klik pertama mengembalikannya, tidak membuka apa pun.
+      if (isHidden()) { setHidden(false); return; }
+
       // Klik pertama saat tombol sedang redup hanya "membangunkan" tombol, supaya
-      // klik tak sengaja di halaman LMS tidak langsung membuka apa pun.
+      // klik tak sengaja di halaman LMS tidak langsung membuka tab baru.
       if (isIdle()) { wake(); return; }
       wake();
 
       toggleCornerMenu(false);
-      toggleChoiceMenu(choiceMenu.classList.contains('alb-ext-hidden'));
+      setBtnLoading(true);
+      prepareSession().then(function(sessionId) {
+        setBtnLoading(false);
+        openWorkspace(sessionId);
+      });
     };
-
-    // ============================================================
-    // [v0.9.91] CHAT INLINE — versi ringkas yang hidup di halaman LMS.
-    // Batasannya DISENGAJA: hanya panduan pakai VClass, hanya jawaban SISTEM, tanpa AI.
-    // Pertanyaan materi/AI tidak dikirim ke server sama sekali; siswa langsung diarahkan
-    // membuka tab baru. Ini menjaga kuota AI bersama sekaligus bikin perilakunya jelas.
-    // ============================================================
-    var inlinePanel = null;
-    var inlineSessionId = null;
-    var inlineBusy = false;
-
-    // Pertanyaan yang MEMANG bisa dijawab di sini: "cara/langkah/panduan" seputar VClass.
-    function isTutorialQuestion(text) {
-      var t = String(text || '').toLowerCase();
-      // Catatan: file ini adalah TEMPLATE LITERAL Node — semua escape regex wajib ditulis
-      // ganda (\\b), kalau tunggal ia jadi karakter backspace dan polanya tak pernah cocok.
-      var howTo = /\\b(cara|caranya|gimana|gmn|bagaimana|langkah|tutorial|panduan|petunjuk|tata cara)\\b/.test(t);
-      var topic = /\\b(login|masuk|logout|keluar|nilai|rapor|tugas|kumpul|upload|unggah|forum|diskusi|balas|reply|kuis|quiz|ujian|aktivitas|activity|vclass|moodle)\\b/.test(t);
-      return howTo && topic;
-    }
-
-    function escapeHtml(value) {
-      return String(value == null ? '' : value)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-    }
-
-    // Markdown seadanya: **tebal** + baris baru. Cukup untuk balasan panduan.
-    function inlineFormat(text) {
-      return escapeHtml(text).replace(/\\*\\*(.+?)\\*\\*/g, '<b>$1</b>').replace(/\\n/g, '<br/>');
-    }
-
-    function inlineAppend(role, html) {
-      var body = inlinePanel.querySelector('.alb-inline-body');
-      var row = document.createElement('div');
-      row.className = 'alb-inline-msg alb-inline-' + role;
-      row.innerHTML = html;
-      body.appendChild(row);
-      body.scrollTop = body.scrollHeight;
-      return row;
-    }
-
-    // Ajakan pindah ke tab baru — dipakai untuk semua pertanyaan di luar cakupan inline.
-    function inlineOfferNewTab(reason) {
-      var row = inlineAppend('bot',
-        '<div>' + escapeHtml(reason) + '</div>'
-        + '<button type="button" class="alb-inline-open-tab"><i class="fa-solid fa-arrow-up-right-from-square"></i> Buka di tab baru</button>');
-      row.querySelector('.alb-inline-open-tab').addEventListener('click', function() {
-        openWorkspace(inlineSessionId);
-      });
-    }
-
-    function inlineSend(text) {
-      if (inlineBusy || !text) return;
-
-      inlineAppend('user', escapeHtml(text));
-      inlinePanel.querySelector('.alb-inline-input').value = '';
-
-      // Di luar cakupan panduan → jangan repotkan server, langsung arahkan ke tab baru.
-      if (!isTutorialQuestion(text)) {
-        inlineOfferNewTab('Pertanyaan ini butuh materi kelas atau bantuan AI, dan itu hanya tersedia di halaman penuh AI Buddy.');
-        return;
-      }
-
-      inlineBusy = true;
-      var typing = inlineAppend('bot', '<span class="alb-inline-typing">Mencari panduan…</span>');
-
-      fetchWithTimeout(apiBase + '/api/chat/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: inlineSessionId,
-          message: text,
-          projectKey: projectKey,
-          pageContext: { title: document.title },
-          // Kunci ke jalur sistem/panduan. forceAI:false + responseMode 'system' membuat
-          // backend TIDAK pernah memanggil Gemini dari sini.
-          responseMode: 'system',
-          forceAI: false,
-          forceFAQ: false,
-          expectedSourceType: 'template'
-        })
-      }, ALB_REQUEST_TIMEOUT_MS, 'Mencari panduan')
-        .then(function(r) { return r.json(); })
-        .then(function(res) {
-          typing.remove();
-          inlineBusy = false;
-
-          var data = res && res.data ? res.data : null;
-          var bot = data && data.botMessage ? data.botMessage : null;
-
-          // Sistem tak punya jawaban pasti (mis. menawarkan dialihkan ke AI) → arahkan keluar.
-          if (!bot || !bot.message || (data && data.needs_ai_confirm)) {
-            inlineOfferNewTab('Aku belum punya panduan siap pakai untuk ini. Buka di tab baru supaya bisa dibantu lebih lengkap ya.');
-            return;
-          }
-
-          var tutorialAction = (bot.actions || []).filter(function(a) { return a.type === 'static_tutorial_carousel'; })[0];
-          var row = inlineAppend('bot', '<div>' + inlineFormat(bot.message) + '</div>');
-
-          if (tutorialAction && tutorialAction.payload) {
-            var openBtn = document.createElement('button');
-            openBtn.type = 'button';
-            openBtn.className = 'alb-inline-tut-btn';
-            openBtn.innerHTML = '<i class="fa-solid fa-book-open-reader"></i> ' + escapeHtml(tutorialAction.label || 'Lihat Panduan');
-            openBtn.addEventListener('click', function() { openInlineTutorial(tutorialAction.payload); });
-            row.appendChild(openBtn);
-          } else {
-            // Ada teks tapi tanpa panduan bergambar → tetap tawarkan versi lengkapnya.
-            inlineOfferNewTab('Butuh penjelasan lebih dalam? Buka di tab baru ya.');
-          }
-        })
-        .catch(function(err) {
-          typing.remove();
-          inlineBusy = false;
-          console.error('[AI Buddy Inline] gagal:', err);
-          inlineOfferNewTab('Koneksi ke server sedang bermasalah.');
-        });
-    }
-
-    function buildInlinePanel() {
-      var panel = document.createElement('div');
-      panel.id = 'alb-inline-panel';
-      panel.className = 'alb-inline-panel';
-      panel.innerHTML = [
-        '<div class="alb-inline-head">',
-        '  <div class="alb-inline-head-txt"><b>' + escapeHtml(launcherText) + '</b><small>Mode ringkas · panduan VClass</small></div>',
-        '  <button type="button" class="alb-inline-close" aria-label="Tutup"><i class="fa-solid fa-xmark"></i></button>',
-        '</div>',
-        '<div class="alb-inline-note">',
-        '  <i class="fa-solid fa-circle-info"></i>',
-        '  <span>Di sini aku hanya menjawab <b>cara pakai VClass</b>. Untuk tanya materi atau minta bantuan AI, buka di tab baru ya.</span>',
-        '</div>',
-        '<div class="alb-inline-body"></div>',
-        '<form class="alb-inline-form">',
-        '  <input type="text" class="alb-inline-input" placeholder="Contoh: cara mengumpulkan tugas" autocomplete="off" />',
-        '  <button type="submit" class="alb-inline-send" aria-label="Kirim"><i class="fa-solid fa-paper-plane"></i></button>',
-        '</form>'
-      ].join('');
-
-      panel.querySelector('.alb-inline-close').addEventListener('click', function() {
-        panel.classList.add('alb-ext-hidden');
-      });
-      panel.querySelector('.alb-inline-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        inlineSend(panel.querySelector('.alb-inline-input').value.trim());
-      });
-
-      document.body.appendChild(panel);
-      return panel;
-    }
-
-    function openInlinePanel(sessionId) {
-      inlineSessionId = sessionId;
-      if (!inlinePanel) {
-        inlinePanel = buildInlinePanel();
-        inlineAppend('bot', 'Halo! Tanya aku soal <b>cara memakai VClass</b> ya — misalnya cara mengumpulkan tugas, melihat nilai, atau membalas forum.');
-      }
-      inlinePanel.classList.remove('alb-ext-hidden');
-      inlinePanel.querySelector('.alb-inline-input').focus();
-    }
-
-    // ---- Modal panduan bergambar untuk mode inline -------------------------------
-    // Gambar panduan disajikan oleh aplikasi FE, sedangkan script ini berjalan di origin
-    // LMS — path relatif ('/DETAIL/...') harus diberi awalan appUrl atau pasti 404.
-    function absoluteAssetUrl(url) {
-      var raw = String(url || '');
-      if (!raw) return '';
-      return /^https?:\\/\\//i.test(raw) ? raw : appUrl + (raw.charAt(0) === '/' ? '' : '/') + raw;
-    }
-
-    var tutorialModal = null;
-    var tutorialSteps = [];
-    var tutorialIndex = 0;
-
-    function renderTutorialStep() {
-      var step = tutorialSteps[tutorialIndex] || {};
-      tutorialModal.querySelector('.alb-tut-img').src = absoluteAssetUrl(step.image);
-      tutorialModal.querySelector('.alb-tut-step-title').textContent = step.title || ('Langkah ' + (tutorialIndex + 1));
-      tutorialModal.querySelector('.alb-tut-step-text').textContent = step.text || '';
-      tutorialModal.querySelector('.alb-tut-counter').textContent = 'Langkah ' + (tutorialIndex + 1) + '/' + tutorialSteps.length;
-      tutorialModal.querySelector('.alb-tut-prev').disabled = tutorialIndex <= 0;
-      tutorialModal.querySelector('.alb-tut-next').textContent = tutorialIndex >= tutorialSteps.length - 1 ? 'Selesai' : 'Lanjut';
-    }
-
-    function openInlineTutorial(payload) {
-      tutorialSteps = (payload && payload.steps) || [];
-      if (!tutorialSteps.length) return;
-      tutorialIndex = 0;
-
-      if (!tutorialModal) {
-        tutorialModal = document.createElement('div');
-        tutorialModal.id = 'alb-inline-tutorial';
-        tutorialModal.className = 'alb-tut-overlay';
-        tutorialModal.innerHTML = [
-          '<div class="alb-tut-card">',
-          '  <div class="alb-tut-head">',
-          '    <div class="alb-tut-title"></div>',
-          '    <button type="button" class="alb-tut-close" aria-label="Tutup"><i class="fa-solid fa-xmark"></i></button>',
-          '  </div>',
-          '  <div class="alb-tut-imgwrap"><img class="alb-tut-img" alt="Gambar panduan" /></div>',
-          '  <div class="alb-tut-txt">',
-          '    <span class="alb-tut-counter"></span>',
-          '    <h4 class="alb-tut-step-title"></h4>',
-          '    <p class="alb-tut-step-text"></p>',
-          '  </div>',
-          '  <div class="alb-tut-foot">',
-          '    <button type="button" class="alb-tut-prev">Sebelumnya</button>',
-          '    <button type="button" class="alb-tut-next">Lanjut</button>',
-          '  </div>',
-          '</div>'
-        ].join('');
-
-        tutorialModal.querySelector('.alb-tut-close').addEventListener('click', function() {
-          tutorialModal.classList.add('alb-ext-hidden');
-        });
-        tutorialModal.querySelector('.alb-tut-prev').addEventListener('click', function() {
-          if (tutorialIndex > 0) { tutorialIndex--; renderTutorialStep(); }
-        });
-        tutorialModal.querySelector('.alb-tut-next').addEventListener('click', function() {
-          if (tutorialIndex >= tutorialSteps.length - 1) { tutorialModal.classList.add('alb-ext-hidden'); return; }
-          tutorialIndex++;
-          renderTutorialStep();
-        });
-        document.body.appendChild(tutorialModal);
-      }
-
-      tutorialModal.querySelector('.alb-tut-title').textContent = (payload && payload.title) || 'Panduan VClass';
-      tutorialModal.classList.remove('alb-ext-hidden');
-      renderTutorialStep();
-    }
-
     document.body.appendChild(wrap);
 
+    // Pulihkan mode sembunyi dari kunjungan sebelumnya.
+    var wasHidden = false;
+    try { wasHidden = localStorage.getItem(ALB_HIDDEN_KEY) === '1'; } catch (e) {}
+    if (wasHidden) setHidden(true);
+
     // Hitung mundur peredupan mulai saat DOM halaman LMS siap.
+    if (wasHidden) return;
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', armIdle);
     else armIdle();
   }

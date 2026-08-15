@@ -4159,6 +4159,16 @@ ${previewText || 'Materi terkait ditemukan di dokumen sumber.'}
 
     botMessageText = addStudentGreeting(botMessageText, studentName);
 
+    // [v0.9.92] Tiap jawaban AI ditutup tawaran menghubungi guru. Jawaban AI bisa keliru
+    // atau kurang pas dengan aturan kelas, jadi siswa harus selalu punya jalan ke manusia.
+    if (responseSource === 'ai' && !actions.some((a) => a.type === 'wa_teacher')) {
+      actions = [...actions, {
+        type: 'wa_teacher',
+        label: 'Hubungi Guru (WhatsApp)',
+        note: 'Belum puas dengan jawaban ini? Tanyakan langsung ke gurumu.'
+      }];
+    }
+
     await chatModel.createMessage({
       session_id: sessionId, role: 'assistant', message: botMessageText, intent: detectedIntent,
       context_used: { response_source: responseSource, actions, ai_error_fallback: aiErrorFallback, quota_fallback: quotaFallback, used_model: usedModel }
