@@ -1244,6 +1244,56 @@ function findMatchingFaq(faqs = [], message = '') {
   return bestScore >= 70 ? best : null;
 }
 
+// [v0.9.91] Deteksi pertanyaan tentang IDENTITAS SISWA SENDIRI.
+// Mengembalikan 'nama' | 'email' | 'kelas' | 'umum', atau null kalau bukan.
+function detectPersonalIdentityQuestion(message = '') {
+  const t = normalizeText(message);
+  // Harus menunjuk diri sendiri — "siapa pengajar saya" biarkan ke jalur LMS.
+  const aboutSelf = /\b(saya|aku|gue|gua|ku|kami|namaku|emailku|kelasku|akunku)\b/.test(t) || /\bnamaku\b/.test(t);
+  if (!aboutSelf) return null;
+
+  if (/\b(siapa|apa)\b.*\bnama\b/.test(t) || /\bnama(ku|\s+(saya|aku|gue|gua))\b/.test(t)) return 'nama';
+  if (/\bemail|e mail|surel\b/.test(t)) return 'email';
+  if (/\b(kelas|course|rombel)\b/.test(t) && /\b(apa|mana|berapa|siapa)\b/.test(t)) return 'kelas';
+  if (/\b(siapa)\b.*\b(saya|aku|gue|gua)\b/.test(t)) return 'umum';
+  return null;
+}
+
+function buildPersonalIdentityAnswer(kind, identity = {}, known = false) {
+  const askEmailAction = { type: 'verify_email', label: 'Masukkan Email Moodle' };
+
+  if (!known) {
+    return {
+      text: 'Aku **belum tahu** data dirimu, jadi aku tidak bisa menebak-nebak ya. 🙏\n\n'
+        + 'Sistem baru bisa mengenali kamu setelah **email Moodle** kamu diverifikasi. '
+        + 'Setelah itu aku bisa bantu hal yang lebih personal: nama, kelas, tugas yang belum selesai, deadline, sampai nilai.\n\n'
+        + 'Mau masukkan email Moodle sekarang?',
+      actions: [askEmailAction]
+    };
+  }
+
+  const name = String(identity.name || '').trim();
+  const email = String(identity.email || '').trim();
+  const kelas = String(identity.classCode || '').trim();
+
+  if (kind === 'email') {
+    return { text: `Email Moodle yang terhubung dengan sesi ini adalah **${email}**.`, actions: [] };
+  }
+  if (kind === 'kelas') {
+    return kelas
+      ? { text: `Berdasarkan data Moodle, kamu ada di kelas **${kelas}**.`, actions: [] }
+      : { text: 'Emailmu sudah terverifikasi, tapi **kode kelasmu belum terbaca** dari Moodle. Coba buka AI Buddy dari halaman course VClass supaya kelasnya ikut terdeteksi ya.', actions: [] };
+  }
+  // nama / umum
+  return {
+    text: `Menurut data Moodle, kamu **${name || 'belum punya nama terdaftar'}**`
+      + (email ? ` (${email})` : '')
+      + (kelas ? `, kelas **${kelas}**` : '')
+      + '.\n\nKalau ada yang keliru, kamu bisa perbarui lewat ikon pensil di header ya.',
+    actions: []
+  };
+}
+
 function buildActivityInfoText(activity = {}) {
   const parts = [`📌 **${String(activity.title || 'Tugas ini').trim()}**`];
   if (activity.instruction) parts.push(String(activity.instruction).trim());
@@ -2675,6 +2725,31 @@ const chatService = {
         is_locked: safetyState.locked, warnings: safetyState.warnings,
         botMessage: { message: text, actions: [] }
       };
+    }
+
+    // [v0.9.91] Pertanyaan tentang DIRI SISWA ("siapa namaku", "email aku apa", "aku kelas
+    // berapa"). Sistem tidak boleh menebak dan tidak boleh melempar ke AI — AI tak punya
+    // datanya sama sekali. Kalau email Moodle sudah diverifikasi, jawab dari data itu;
+    // kalau belum, katakan terus terang belum tahu + tawarkan tombol isi email.
+    if (!mention && !elementContext) {
+      const personal = detectPersonalIdentityQuestion(effectiveMessage);
+      if (personal) {
+        const identity = { name: studentName, email: studentEmail, classCode, courseId: fallbackCourseId };
+        const known = Boolean(studentEmail);
+        const built = buildPersonalIdentityAnswer(personal, identity, known);
+
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: 'tanya_identitas' });
+        await chatModel.createMessage({
+          session_id: sessionId, role: 'assistant', message: built.text, intent: 'tanya_identitas',
+          context_used: { response_source: 'system', actions: built.actions, used_model: 'identity_guard' }
+        });
+        return {
+          intent: 'tanya_identitas', response_source: 'system',
+          ai_usage: aiRateLimitService.getStatus(sessionId),
+          is_locked: safetyState.locked, warnings: safetyState.warnings,
+          botMessage: { message: built.text, actions: built.actions }
+        };
+      }
     }
 
     // [v0.9.61] HARD GUARD anti-contek: soal pilihan ganda yang minta dijawabkan → TOLAK

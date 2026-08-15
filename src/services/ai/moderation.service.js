@@ -1,4 +1,6 @@
-const badwords = require('indonesian-badwords');
+// [v0.9.91] Dependensi `indonesian-badwords` DIHAPUS: daftarnya luas & cocok substring,
+// jadi jadi sumber utama false positive (mis. "sosial"→"sial", "detail"→"tai"). Daftar
+// makian kini eksplisit dan dicocokkan sebagai kata utuh — lihat ALWAYS_PROFANE.
 
 const moderationService = {
   checkMessage(message) {
@@ -8,65 +10,28 @@ const moderationService = {
     // =========================
     // 1. Hate Speech / Kekerasan / SARA
     // =========================
+    // [v0.9.91] DIPERSEMPIT DRASTIS. Versi lama memuat kata sehari-hari seperti
+    // 'mati', 'hancur', 'rusak', 'bom', 'serang', 'benci' sebagai kata TUNGGAL, sehingga
+    // pertanyaan wajar ikut diblokir — mis. "batre hp abis dan tiba tiba mati, kuisnya
+    // gimana?" dianggap ujaran kebencian. Sekarang yang diblokir hanya ANCAMAN yang
+    // ditujukan ke orang (kata kerja + sasaran) dan frasa kebencian yang tak punya
+    // makna netral. Kata kerja kekerasan sendirian TIDAK lagi cukup untuk memblokir.
     const hateWords = [
-      // Kekerasan / ancaman
-      'bunuh',
-      'membunuh',
-      'dibunuh',
-      'ngebunuh',
-      'habisi',
-      'menghabisi',
-      'hajar',
-      'pukul',
-      'gebuk',
-      'gebukin',
-      'bantai',
-      'membantai',
-      'serang',
-      'menyerang',
-      'tikam',
-      'tusuk',
-      'bacok',
-      'tembak',
-      'gantung',
-      'cekik',
-      'racun',
-      'ledakkan',
-      'bom',
-      'mati',
-      'matilah',
-      'mampus',
-      'modar',
-      'lenyapkan',
-      'hancurkan',
-      'hancur',
-      'rusak',
-      'rusakin',
+      // Ancaman ke orang: kata kerja kekerasan HARUS punya sasaran.
+      'bunuh kamu', 'bunuh dia', 'bunuh lu', 'bunuh lo', 'bunuh aja', 'gua bunuh', 'aku bunuh',
+      'kubunuh', 'bunuhin', 'membunuhmu',
+      'bacok kamu', 'bacok lu', 'bacok lo', 'gua bacok',
+      'tusuk kamu', 'tusuk lu', 'tikam kamu',
+      'hajar kamu', 'hajar lu', 'hajar lo', 'gua hajar',
+      'gebukin lu', 'gebukin lo', 'bantai lu', 'bantai lo',
+      'cekik kamu', 'racun kamu',
+      'mati aja lu', 'mati aja lo', 'mati kamu', 'matilah kamu', 'mampus lu', 'mampus lo',
+      'semoga mati', 'biar mati aja',
 
-      // Kebencian / penghinaan kelompok
-      'rasis',
-      'sara',
-      'diskriminasi',
-      'diskriminatif',
-      'hina',
-      'menghina',
-      'benci',
-      'kebencian',
-      'usir',
-      'usir mereka',
-      'tidak pantas hidup',
-      'rendahan',
-      'kaum rendah',
-      'dasar kaum',
-
-      // Agama / identitas yang sering jadi bahan serangan
-      // Catatan: kata ini tidak selalu hate speech, tapi kalau muncul sebaiknya dipantau.
-      'kafir',
-      'sesat',
-      'najis',
-      'agama sampah',
-      'ras sampah',
-      'suku sampah'
+      // Kebencian kelompok — frasa, bukan kata tunggal.
+      'agama sampah', 'ras sampah', 'suku sampah', 'kaum rendah', 'dasar kaum',
+      'tidak pantas hidup', 'gak pantas hidup', 'usir mereka', 'basmi mereka',
+      'dasar kafir', 'dasar sesat', 'dasar najis'
     ];
 
     // =========================
@@ -229,55 +194,48 @@ function escapeRegex(string) {
 }
 
 
+// [v0.9.91] Makian yang maknanya TUNGGAL — tidak ada pemakaian netral dalam bahasa
+// Indonesia, jadi aman diblokir tanpa melihat konteks. Cocok sebagai KATA UTUH; angka
+// penyamar (beg0, t0l0l, g0bl0k) sudah dinormalkan lebih dulu oleh normalizeText().
+const ALWAYS_PROFANE = [
+  // Hinaan kecerdasan
+  'bego', 'begok', 'goblok', 'goblog', 'tolol', 'dongo', 'dungu', 'idiot', 'bodoh banget',
+  // Makian umum
+  'bangsat', 'bajingan', 'keparat', 'brengsek', 'sialan', 'jancok', 'jancuk', 'cok',
+  'asu', 'kampret', 'tai', 'taik', 'setan lu', 'setan lo',
+  // Alat kelamin / seksual
+  'kontol', 'memek', 'pepek', 'itil', 'ngentot', 'ngentod', 'entot', 'peju', 'pantek'
+];
+
+// Nama hewan: makian HANYA kalau dipakai untuk mengumpat/meledek. Dalam pertanyaan
+// pelajaran ("apa itu anjing laut", "kenapa babi tidak dimakan") ini kata biasa.
+const ANIMAL_INSULTS = ['anjing', 'anjir', 'anjay', 'babi', 'monyet', 'kunyuk', 'bangke', 'kadal'];
+
+// Penanda bahwa kalimatnya BERTANYA/membahas, bukan mengumpat.
+const INFORMATIONAL_RE = /\b(apa|apakah|kenapa|mengapa|bagaimana|gimana|jelaskan|jelasin|maksud|arti|pengertian|definisi|contoh|jenis|hewan|binatang|spesies|ternak|peliharaan|daging|gambar|materi|tentang|laut|liar)\b/;
+
+// Penanda bahwa kata hewan itu memang dipakai sebagai umpatan/ledekan.
+const INSULT_MARKER_RE = /\b(dasar|si|dah|banget|bgt|amat|lu|lo|loe|kamu|elu|kau|nih|deh|woy|woi)\b/;
+
+function matchesWholeWord(word, normalized) {
+  return new RegExp(`\\b${escapeRegex(normalizeText(word))}\\b`, 'i').test(normalized);
+}
+
 function detectWholeWordProfanity(originalMessage = '', normalizedMessage = '') {
   const normalized = normalizeText(originalMessage || normalizedMessage || '');
 
-  // Query edukasi yang sering kena false positive dari library karena substring:
-  // "media sosial" mengandung "sial", "detail" mengandung "tai".
-  const educationalWhitelist = [
-    /\bmedia\s+sosial\b/i,
-    /\bsosial\s+media\b/i,
-    /\bdetail\b/i,
-    /\bjelaskan\s+lebih\s+detail\b/i,
-    /\bapa\s+itu\b/i
-  ];
+  const detected = ALWAYS_PROFANE.filter((word) => matchesWholeWord(word, normalized));
 
-  if (educationalWhitelist.some((pattern) => pattern.test(originalMessage))) {
-    // Tetap cek kata kasar eksplisit sebagai kata utuh, bukan substring.
-    const explicit = explicitProfanityWords().filter((word) => {
-      const re = new RegExp(`\\b${escapeRegex(normalizeText(word))}\\b`, 'i');
-      return re.test(normalized);
+  // Kata hewan butuh konteks: ada penanda umpatan DAN tidak sedang dibahas sebagai topik.
+  const isInformational = INFORMATIONAL_RE.test(normalized);
+  const hasInsultMarker = INSULT_MARKER_RE.test(normalized);
+  if (!isInformational && hasInsultMarker) {
+    ANIMAL_INSULTS.forEach((word) => {
+      if (matchesWholeWord(word, normalized)) detected.push(word);
     });
-    return { isFlagged: explicit.length > 0, detectedWords: explicit };
   }
 
-  const explicit = explicitProfanityWords().filter((word) => {
-    const re = new RegExp(`\\b${escapeRegex(normalizeText(word))}\\b`, 'i');
-    return re.test(normalized);
-  });
-
-  if (explicit.length > 0) return { isFlagged: true, detectedWords: explicit };
-
-  // Hindari badwords.flag() langsung karena dia cenderung substring-match.
-  // Ambil daftar badwords dari library bila tersedia, lalu cek sebagai kata utuh.
-  try {
-    const list = Array.isArray(badwords.words) ? badwords.words : [];
-    const detected = list
-      .map((word) => normalizeText(word))
-      .filter(Boolean)
-      .filter((word) => new RegExp(`\\b${escapeRegex(word)}\\b`, 'i').test(normalized));
-
-    if (detected.length > 0) return { isFlagged: true, detectedWords: [...new Set(detected)] };
-  } catch (_) {}
-
-  return { isFlagged: false, detectedWords: [] };
-}
-
-function explicitProfanityWords() {
-  return [
-    'anjing', 'bangsat', 'kontol', 'memek', 'goblok', 'tolol', 'bego', 'babi',
-    'tai', 'taik', 'sialan', 'kampret', 'brengsek', 'jancok', 'cok', 'asu'
-  ];
+  return { isFlagged: detected.length > 0, detectedWords: [...new Set(detected)] };
 }
 
 // [v0.9.84] Jumlah bintang = panjang katanya, jadi "BEGO banget" → "**** banget"
