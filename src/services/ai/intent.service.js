@@ -484,7 +484,8 @@ const INTENT_KEYWORDS = {
   daftar_materi: ['materi apa aja', 'daftar materi', 'list materi', 'ada materi apa'],
   rekomendasi_materi: ['harus dipelajari', 'saran materi', 'prioritas', 'sebaiknya pelajari', 'belajar apa dulu'],
   klarifikasi: ['lebih sederhana', 'maksudnya', 'belum paham', 'ulangi', 'simpel', 'gak ngerti'],
-  hubungi_guru: ['hubungi guru', 'tanya guru', 'kontak guru', 'bantuan guru', 'chat guru'],
+  hubungi_guru: ['hubungi guru', 'tanya guru', 'kontak guru', 'bantuan guru', 'chat guru', 'guru'],
+  cek_pengajar_course: ['pengajar', 'guru', 'dosen', 'wali kelas', 'nama guru', 'siapa guru'],
   minta_jawaban_langsung: ['jawabannya', 'kunci jawaban', 'jawab langsung', 'kasih jawaban'],
   fitur_tidak_didukung: ['ubah password', 'ganti password', 'ganti email', 'hapus akun', 'ganti nama', 'ubah profil'],
   cek_tugas_belum_selesai: ['tugas belum', 'belum selesai', 'tugas apa aja', 'belum dikerjakan'],
@@ -589,6 +590,36 @@ const AMBIGUITY_GROUPS = [
   }
 ];
 
+// [v0.9.93] Intent yang tidak layak jadi PILIHAN tombol: bukan tujuan yang siswa pilih
+// sadar-sadar, hanya efek samping kata sapaan/permintaan.
+const NOT_PICKABLE = new Set(['small_talk', 'minta_jawaban_langsung', 'klarifikasi']);
+
+// [v0.9.93] Selisih persen maksimum antara kandidat #1 dan #2 supaya masih disebut "mepet".
+// Di atas ini berarti satu intent memang menang telak → jawab langsung, jangan tanya.
+const AMBIGUITY_GAP_MAX = 15;
+
+// [v0.9.93] Disambiguasi GENERIK (pelengkap AMBIGUITY_GROUPS yang polanya hardcoded).
+// Kalau tak ada satu pun aturan yang yakin (ruleBasedDetect = null) TAPI kata di pesan
+// mengarah ke >1 intent dengan skor mepet, jangan diam-diam pakai yang tertinggi (atau
+// menyerahkannya ke tebakan LLM). Tawarkan maks 3 kandidat teratas.
+// Contoh: "guru" → [Hubungi Guru] / [Info Pengajar].
+function detectAmbiguousByScore(message = '') {
+  // Ada aturan yang cocok = sudah pasti, tidak perlu ditanya.
+  // ("siapa guru course ini" → cek_pengajar_course, "hubungi guru" → hubungi_guru)
+  if (ruleBasedDetect(message)) return null;
+
+  const scored = scoreIntents(message).filter((s) => !NOT_PICKABLE.has(s.intent));
+  if (scored.length < 2) return null;
+  if (scored[0].percent - scored[1].percent > AMBIGUITY_GAP_MAX) return null;
+
+  return {
+    question: 'Pertanyaanmu bisa berarti beberapa hal. Yang mana yang kamu maksud?',
+    // prompt = pesan asli siswa; routing-nya memakai `intent` eksplisit dari tombol,
+    // jadi tak perlu tabel kalimat kanonik per intent.
+    candidates: scored.slice(0, 3).map((s) => ({ intent: s.intent, label: s.label, prompt: message }))
+  };
+}
+
 function detectAmbiguousIntent(message = '') {
   const m = normalizeText(stripFeedbackPrefix(message));
   if (!m || m.length < 3) return null;
@@ -596,7 +627,7 @@ function detectAmbiguousIntent(message = '') {
     try { if (group.test(m)) return { question: group.question, candidates: group.candidates.slice(0, 4) }; }
     catch (_) { /* abaikan group error */ }
   }
-  return null;
+  return detectAmbiguousByScore(message);
 }
 
 module.exports = intentService;

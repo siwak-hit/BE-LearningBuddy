@@ -2911,6 +2911,28 @@ const chatService = {
     }
 
     if (LMS_INTENTS.includes(detectedIntent)) {
+      // [v0.9.93] GATE IDENTITAS. Hanya intent LMS yang benar-benar membaca data Moodle
+      // siswa; sisanya (panduan/materi) tidak butuh email sama sekali. Dulu gate ini di FE
+      // dan menebak dari kata kunci, jadi "aku telat ngumpulin tugas" ikut diminta email
+      // padahal ujungnya cuma panduan statis. Di sini intent-nya sudah pasti.
+      if (!studentEmail && !moodleUserId) {
+        const text = 'Pertanyaan ini butuh **data kelasmu di VClass** — tugas, deadline, kuis, forum, atau nilai. '
+          + 'Aku belum tahu kamu siswa yang mana, jadi datanya belum bisa kuambil.\n\n'
+          + 'Masukkan **email Moodle** kamu dulu ya. Cukup sekali, setelah itu pertanyaan ini langsung kujawab.';
+        const actions = [{ type: 'verify_email', label: 'Masukkan Email Moodle' }];
+        await chatModel.createMessage({ session_id: sessionId, role: 'user', message: effectiveMessage, intent: detectedIntent });
+        await chatModel.createMessage({
+          session_id: sessionId, role: 'assistant', message: text, intent: detectedIntent,
+          context_used: { response_source: 'system', actions, used_model: 'identity_gate' }
+        });
+        return {
+          intent: detectedIntent, response_source: 'system',
+          ai_usage: aiRateLimitService.getStatus(sessionId),
+          is_locked: safetyState.locked, warnings: safetyState.warnings,
+          botMessage: { message: text, actions }
+        };
+      }
+
       try {
         lmsContext = await lmsContextService.buildChatLmsContext({
           projectId, sessionId, classCode, studentName, moodleUserId, studentEmail,
