@@ -16,6 +16,17 @@ const GLOBAL_WINDOW_MS = parseInt(process.env.AI_GLOBAL_WINDOW_MS) || 3600000; /
 
 const aiRateLimitService = {
   users: new Map(),
+  // [v0.9.94] Sesi yang cooldown-nya DIMATIKAN guru (switch `disable_cooldown` di dashboard).
+  // ponytail: satu gerbang di getStatus/consume — semua ±30 pemanggil di chat.service otomatis
+  // ikut bebas, tak perlu diubah satu-satu. Map ikut hidup selama proses (sama seperti `users`).
+  unlimited: new Set(),
+
+  setUnlimited(sessionId, on) {
+    if (!sessionId) return;
+    if (on) this.unlimited.add(sessionId);
+    else this.unlimited.delete(sessionId);
+  },
+
   // windowStart = waktu request AI pertama pada jendela berjalan; count = jumlah jawaban AI.
   globalUsage: { windowStart: 0, count: 0 },
 
@@ -64,6 +75,7 @@ const aiRateLimitService = {
 
   getStatus(sessionId) {
     if (!sessionId) return this._defaultStatus();
+    if (this.unlimited.has(sessionId)) return this._defaultStatus();
 
     const now = Date.now();
     const userData = this.users.get(sessionId);
@@ -120,6 +132,7 @@ const aiRateLimitService = {
 
   consume(sessionId) {
     if (!sessionId) return this._defaultStatus();
+    if (this.unlimited.has(sessionId)) return this._defaultStatus();
 
     const currentStatus = this.getStatus(sessionId);
 
@@ -145,6 +158,7 @@ const aiRateLimitService = {
 
   startCooldown(sessionId) {
     if (!sessionId) return this._defaultStatus();
+    if (this.unlimited.has(sessionId)) return this._defaultStatus();
 
     const now = Date.now();
 

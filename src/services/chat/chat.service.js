@@ -21,6 +21,32 @@ const documentModel = require('../../models/document.model');
 const aiQueueService = require('../ai/aiQueue.service');
 const lmsContextService = require('../moodle/lms-context.service');
 const moodleService = require('../moodle/moodle.service');
+const widgetModel = require('../../models/widget.model');
+
+// [v0.9.94] Switch guru dari dashboard (widget_configs.theme.features). Sumbernya sama
+// persis dengan yang dibaca FE, jadi tak ada kolom/tabel baru.
+// ponytail: memo 60 dtk — guru menyimpan switch → efektif paling lama 1 menit kemudian.
+const FLAGS_TTL_MS = 60000;
+const flagsCache = new Map();
+
+async function getProjectFeatureFlags(projectId) {
+  if (!projectId) return {};
+
+  const hit = flagsCache.get(projectId);
+  if (hit && (Date.now() - hit.at) < FLAGS_TTL_MS) return hit.flags;
+
+  let flags = {};
+  try {
+    const configs = await widgetModel.findByProjectId(projectId);
+    const theme = safeParseObject(configs?.[0]?.theme, {});
+    flags = theme.features || {};
+  } catch (e) {
+    console.warn('[Chat] gagal baca feature flags, pakai default:', e.message);
+  }
+
+  flagsCache.set(projectId, { at: Date.now(), flags });
+  return flags;
+}
 
 function safeParseObject(value, fallback = {}) {
   if (!value) return fallback;
@@ -2619,6 +2645,11 @@ const chatService = {
 
   async processMessage({ sessionId, projectId, message, pageContext, elementContext, expectedSourceType, forceAI = false, forceFAQ = false, responseMode = 'default', intent = null, mention = null, freshMention = false }) {
     const session = await chatModel.getSessionById(sessionId);
+
+    // [v0.9.94] Switch guru: matikan cooldown / matikan deteksi kata kasar.
+    const featureFlags = await getProjectFeatureFlags(projectId);
+    aiRateLimitService.setUnlimited(sessionId, featureFlags.disable_cooldown === true);
+
     let pageContextState = safeParseObject(session.page_context, {});
 
     const sessionPageContext = safeParseObject(session.page_context, {});
@@ -3477,7 +3508,10 @@ Buat balasan singkat: ajak evaluasi bareng, tunjukkan letak konsep yang melencen
       matchedTemplate = selectSystemTemplate({ intent: detectedIntent, templateMap });
     }
 
-    const moderationResultRaw = moderationService.checkMessage(effectiveMessage);
+    // [v0.9.94] Guru bisa mematikan deteksi kata kasar sepenuhnya (tanpa sensor & tanpa warning).
+    const moderationResultRaw = featureFlags.disable_profanity === true
+      ? null
+      : moderationService.checkMessage(effectiveMessage);
     const moderationResult = moderationResultRaw?.isFlagged ? moderationResultRaw : { isFlagged: false };
 
     if (!isAiFollowupPrompt(effectiveMessage, forceAI) && moderationResult.isFlagged && ['hate_speech', 'profanity'].includes(moderationResult.type)) {
