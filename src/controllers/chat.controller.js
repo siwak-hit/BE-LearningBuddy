@@ -350,7 +350,7 @@ const chatController = {
 
   sendMessage: asyncHandler(async (req, res) => {
     // 1. Tangkap seluruh parameter baru dari Frontend payload
-    const { sessionId, message, pageContext, elementContext, expectedSourceType, forceAI, forceFAQ, responseMode, intent, mention, freshMention } = req.body;
+    const { sessionId, message, pageContext, elementContext, expectedSourceType, forceAI, forceFAQ, responseMode, intent, mention, freshMention, disableCooldown, disableProfanity } = req.body;
 
     if (!sessionId || !message) return response.error(res, 'sessionId dan message wajib diisi', null, 400);
 
@@ -370,7 +370,10 @@ const chatController = {
       responseMode: responseMode || 'default',
       intent: intent || null, // Mengatasi error undefined intent
       mention: mention || null, // [v0.7.0] mention @materi-N / @elemen
-      freshMention: freshMention === true // [v0.9.8] minta hasil @materi baru (bypass cache)
+      freshMention: freshMention === true, // [v0.9.8] minta hasil @materi baru (bypass cache)
+      // [v0.9.94] Switch pembatas milik siswa (modal gear Konfigurasi di workspace).
+      disableCooldown: disableCooldown === true,
+      disableProfanity: disableProfanity === true
     });
 
     // [v0.8.0] Komponen AI: deteksi tingkat kesulitan siswa dari pola dialog.
