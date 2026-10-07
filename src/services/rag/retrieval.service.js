@@ -233,16 +233,15 @@ const retrievalService = {
       const baseScore = keywordScoreService.calculateScore(item, query, pageContext);
       const focusBoost = applyFocusBoost(item, query);
       const cmsBoost = getCmsBoost(item, query);
-      const score = baseScore + focusBoost + cmsBoost;
+      // Boost fokus/CMS hanya berlaku kalau item memang relevan secara topik (baseScore >= 5).
+      // Kalau tidak relevan, hanya penalti yang boleh diterapkan.
+      const boosts = focusBoost + cmsBoost;
+      const score = baseScore + (baseScore >= 5 ? boosts : Math.min(0, boosts));
 
       return {
         ...item,
         score,
-        debug_score: {
-          baseScore,
-          focusBoost,
-          cmsBoost
-        }
+        debug_score: { baseScore, focusBoost, cmsBoost }
       };
     });
 
@@ -260,6 +259,14 @@ const retrievalService = {
         return indexA - indexB;
       })
       .slice(0, limit || 5);
+
+    if (process.env.RAG_DEBUG === '1') {
+      console.log('[RAG]', JSON.stringify({
+        query, courseId, hits: results.map((r) => ({
+          title: r.title, topic: r.topic, score: r.score, debug: r.debug_score
+        }))
+      }));
+    }
 
     return results;
   }

@@ -66,11 +66,15 @@ const lmsRouteModel = {
       ...payload,
       project_id: projectId,
       is_active: payload.is_active !== false,
-      updated_at: now,
-      last_synced_at: payload.last_synced_at || now
+      updated_at: now
     };
 
     const existing = await this.findCourseRouteAny(projectId, safePayload.class_code);
+
+    // last_synced_at hanya ditulis bila pemanggil memintanya (sync materi yang SUKSES).
+    // Baris baru tanpa stempel = belum pernah sync → langsung dianggap basi oleh gate.
+    if (payload.last_synced_at) safePayload.last_synced_at = payload.last_synced_at;
+    else if (!existing) safePayload.last_synced_at = null;
 
     if (existing) {
       const { data, error } = await getClient()
@@ -118,13 +122,39 @@ const lmsRouteModel = {
         course_url: course.course_url,
         course_title: course.course_title || `Course ${course.course_id}`,
         teacher_name: course.teacher_name || null,
-        is_active: course.is_active !== false,
-        last_synced_at: new Date().toISOString()
+        is_active: course.is_active !== false
       });
       result.push(saved);
     }
 
     return result;
+  },
+
+    // Snapshot struktur course (hasil core_course_get_contents versi ringan) untuk mode offline.
+  async saveContentsSnapshot(projectId, courseId, snapshot) {
+    if (!projectId || !courseId || !Array.isArray(snapshot)) return 0;
+    const { data, error } = await getClient()
+      .from(COURSE_TABLE)
+      .update({ contents_snapshot: snapshot, contents_snapshot_at: new Date().toISOString() })
+      .eq('project_id', projectId)
+      .eq('course_id', Number(courseId))
+      .select('id');
+    if (error) throw error;
+    return Array.isArray(data) ? data.length : 0;
+  },
+
+  async getContentsSnapshot(projectId, courseId) {
+    if (!projectId || !courseId) return null;
+    const { data, error } = await getClient()
+      .from(COURSE_TABLE)
+      .select('contents_snapshot, contents_snapshot_at')
+      .eq('project_id', projectId)
+      .eq('course_id', Number(courseId))
+      .not('contents_snapshot', 'is', null)
+      .order('contents_snapshot_at', { ascending: false })
+      .limit(1);
+    if (error) throw error;
+    return (data && data[0]) || null;
   },
 
   async upsertActivityRoute(projectId, payload) {

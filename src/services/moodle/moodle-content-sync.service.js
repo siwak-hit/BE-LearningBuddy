@@ -207,6 +207,25 @@ function buildActivityRow({
   };
 }
 
+// Versi ringan struktur course: hanya field yang dipakai daftar @materi & perhitungan gembok.
+function buildSlimSnapshot(contents = []) {
+  return (Array.isArray(contents) ? contents : []).map((s) => ({
+    id: s.id,
+    name: s.name,
+    section: s.section,
+    modules: (s.modules || []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      modname: m.modname,
+      visible: m.visible,
+      visibleoncoursepage: m.visibleoncoursepage,
+      url: m.url || null,
+      availability: m.availability || null,
+      availabilityinfo: m.availabilityinfo || ''
+    }))
+  }));
+}
+
 const moodleContentSyncService = {
   htmlToPlainText(html) {
     if (!html) return '';
@@ -353,13 +372,15 @@ const moodleContentSyncService = {
         course_url: sourcePageUrl,
         course_title: courseTitle,
         teacher_name: teacherName,
-        is_active: true,
-        last_synced_at: new Date().toISOString()
+        is_active: true
       });
       summary.courseRouteUpdated = true;
 
       const dataset = await this.getMoodleDataset(projectId, courseId, { includeActivities: !materialOnly });
       const { contents, assignments, quizzes, forums, pages, resources } = dataset;
+
+      try { await lmsRouteModel.saveContentsSnapshot(projectId, courseId, buildSlimSnapshot(contents)); }
+      catch (e) { console.warn('[Moodle Sync] simpan snapshot struktur gagal:', e.message); }
 
       const assignByCmid = indexByModuleId(assignments, (item) => item.cmid);
       const quizByCmid = indexByModuleId(quizzes, (item) => item.coursemodule);
@@ -556,6 +577,16 @@ const moodleContentSyncService = {
       console.error(`[Moodle Sync Error] Course ${courseId}:`, error.message);
     }
 
+    if (!summary.errors.length) {
+      try {
+        await lmsRouteModel.upsertCourseRoute(projectId, {
+          class_code: classCode,
+          course_id: Number(courseId),
+          last_synced_at: new Date().toISOString()
+        });
+      } catch (e) { console.warn('[Moodle Sync] stempel last_synced_at gagal:', e.message); }
+    }
+
     return summary;
   },
 
@@ -649,6 +680,9 @@ const moodleContentSyncService = {
         idnumber: String(u.idnumber || '').trim().toLowerCase() || null
       };
     }).filter(Boolean);
+
+
+    if (!rows.length) return { students: 0, withEmail: 0, skipped: 'empty_response' };
 
     const withEmail = rows.filter((r) => r.email).length;
     let stored = 0;
@@ -804,4 +838,5 @@ const moodleContentSyncService = {
   }
 };
 
+moodleContentSyncService.buildSlimSnapshot = buildSlimSnapshot;
 module.exports = moodleContentSyncService;

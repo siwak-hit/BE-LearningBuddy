@@ -4,6 +4,9 @@ const generateApiKey = require('../utils/generate-api-key');
 const widgetLoaderService = require('../services/widget/widget-loader.service');
 const externalLoaderService = require('../services/widget/external-loader.service');
 
+const CFG_TTL_MS = 60000;
+const cfgCache = new Map();
+
 const widgetController = {
   async create(req, res) {
     const {
@@ -47,7 +50,11 @@ const widgetController = {
     res.setHeader('Expires', '0');
     res.setHeader('Surrogate-Control', 'no-store');
 
+    const hit = cfgCache.get(projectKey);
+    if (hit && Date.now() - hit.t < CFG_TTL_MS) return response.success(res, 'Config widget berhasil diambil', hit.v);
+
     const widgetConfig = await widgetModel.findByProjectKey(projectKey);
+    if (widgetConfig) cfgCache.set(projectKey, { t: Date.now(), v: widgetConfig });
 
     return response.success(
       res,

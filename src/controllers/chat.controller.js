@@ -19,6 +19,7 @@ const moodleStudentModel = require('../models/moodleStudent.model');
 const difficultyService = require('../services/ai/difficulty.service');
 const intentService = require('../services/ai/intent.service');
 const recommendationService = require('../services/ai/recommendation.service');
+const moodleContentSyncService = require('../services/moodle/moodle-content-sync.service');
 
 // Apakah dua waktu berada pada hari kalender yang sama (zona Asia/Jakarta)?
 // Dipakai untuk aturan "lanjutkan sesi selama masih hari yang sama / sebelum jam 12 malam".
@@ -401,13 +402,19 @@ const chatController = {
     // mati), tandai respons agar FE menampilkan catatan bahwa jawaban berasal dari PANDUAN
     // penggunaan Moodle — bukan materi/forum terbaru. Non-blocking & di-cache (~5 menit).
     try {
-      const health = await moodleService.isMoodleDegraded(session.project_id);
-      if (health.degraded) {
-        result.degraded = true;
-        result.degraded_reason = health.reason;
-        result.degraded_note = health.reason === 'token'
-          ? 'Koneksi ke Moodle sedang bermasalah (akses kedaluwarsa). Jawaban ini dari panduan penggunaan Moodle, bukan materi atau forum terbaru.'
-          : 'Koneksi ke Moodle sedang bermasalah. Jawaban ini dari panduan penggunaan Moodle, bukan materi atau forum terbaru.';
+      // Catatan darurat hanya relevan untuk jawaban dari PANDUAN Moodle (sistem/FAQ),
+      // bukan untuk jawaban dari materi (RAG), AI, maupun cache.
+      const src = result?.response_source;
+      const fromMateri = Boolean(mention) || src === 'ai' || result?.used_model === 'cache';
+      if (!fromMateri) {
+        const health = await moodleService.isMoodleDegraded(session.project_id);
+        if (health.degraded) {
+          result.degraded = true;
+          result.degraded_reason = health.reason;
+          result.degraded_note = health.reason === 'token'
+            ? 'Koneksi ke Moodle sedang bermasalah (akses kedaluwarsa). Jawaban ini dari panduan penggunaan Moodle, bukan materi atau forum terbaru.'
+            : 'Koneksi ke Moodle sedang bermasalah. Jawaban ini dari panduan penggunaan Moodle, bukan materi atau forum terbaru.';
+        }
       }
     } catch (e) {
       console.warn('[Degraded] cek kesehatan Moodle gagal:', e.message);
@@ -517,9 +524,11 @@ const chatController = {
   //   - hanya modul materi (page/resource/book/url/folder), bukan tugas/kuis/forum
   //   - skip yang disembunyikan instruktur (visible === 0)
   //   - locked = uservisible === false ATAU ada availabilityinfo (prasyarat belum tuntas)
+//    menampilkan catatan "materi tersimpan").
   getSessionMaterials: asyncHandler(async (req, res) => {
     const { sessionId } = req.params;
     if (!sessionId) return response.error(res, 'sessionId diperlukan', null, 400);
+    const forceFresh = String(req.query.fresh || '') === '1';
 
     const session = await chatModel.getSessionById(sessionId);
     if (!session) return response.error(res, 'Sesi tidak ditemukan', null, 404);
@@ -540,12 +549,57 @@ const chatController = {
     }
     if (!courseId) return response.success(res, 'Course belum terdeteksi', [], 200);
 
+    const wsOpen = moodleSyncGate.isWsWindowOpen();
+    const SNAP_TTL_MS = Number(process.env.MATERI_SNAPSHOT_TTL_MS || 10 * 60 * 1000);
+
+    // Ping kesehatan Moodle: lazy & dibagi antar langkah (maks. sekali per request).
+    let reachPromise = null;
+    const getReach = () => {
+      if (!wsOpen) return Promise.resolve({ ok: false, reason: 'ws_window_closed' });
+      if (!reachPromise) reachPromise = moodleSyncGate.canReachMoodle(projectId);
+      return reachPromise;
+    };
+    let reachOk = wsOpen; // diperbarui bila ping benar-benar dilakukan
+
+    // ── 1) Query independen secara PARALEL ──
+    const [snap, docs, uid] = await Promise.all([
+      lmsRouteModel.getContentsSnapshot(projectId, courseId).catch(() => null),
+      documentModel.findLiteByProjectId(projectId).catch(() => []),
+      resolveStudentUserId(projectId, meta, courseId)
+    ]);
+    const moodleUserId = uid.userId || null;
+
+    // ── 2) Struktur course: snapshot segar → live → snapshot basi ──
+    const snapSections = (Array.isArray(snap?.contents_snapshot) && snap.contents_snapshot.length) ? snap.contents_snapshot : null;
+    const snapAge = snap?.contents_snapshot_at ? Date.now() - new Date(snap.contents_snapshot_at).getTime() : Infinity;
+
     let sections = [];
-    try {
-      sections = await moodleService.getCourseContents(projectId, courseId);
-    } catch (e) {
-      console.warn('[SessionMaterials] getCourseContents gagal:', e.message);
-      return response.success(res, 'Gagal memuat materi dari Moodle', [], 200);
+    let contentSource = null; // 'live' | 'cache' | 'snapshot'
+    if (snapSections && !forceFresh && snapAge < SNAP_TTL_MS) {
+      sections = snapSections;
+      contentSource = 'cache';
+    } else {
+      const r = await getReach();
+      reachOk = r.ok;
+      if (r.ok) {
+        try {
+          sections = await moodleService.getCourseContents(projectId, courseId);
+          contentSource = 'live';
+          // Segarkan snapshot (tanpa menunggu) supaya request berikutnya cepat.
+          lmsRouteModel.saveContentsSnapshot(projectId, courseId, moodleContentSyncService.buildSlimSnapshot(sections))
+            .catch((e) => console.warn('[SessionMaterials] simpan snapshot gagal:', e.message));
+        } catch (e) {
+          console.warn('[SessionMaterials] getCourseContents gagal, pakai snapshot:', e.message);
+        }
+      }
+      if (!contentSource) {
+        if (snapSections) {
+          sections = snapSections;
+          contentSource = 'snapshot';
+        } else {
+          return response.success(res, 'Materi belum tersedia (Moodle tidak terjangkau dan belum ada data tersimpan)', [], 200);
+        }
+      }
     }
 
     const decodeEntities = (s) => String(s || '')
@@ -553,53 +607,58 @@ const chatController = {
       .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&nbsp;/g, ' ').trim();
     const stripHtml = (s) => decodeEntities(String(s || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
     const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-    // [#2] @materi HANYA modname `page` (materi HTML yang diketik guru & dibaca langsung
-    // di VClass). Selaras dengan chunking page-only — resource/file/url/folder tak masuk
-    // daftar @ supaya tak ada item tanpa isi yang bisa di-rangkum AI.
+    // [#2] @materi HANYA modname `page`.
     const MATERI_MODNAMES = ['page'];
 
-    // [v0.7.3] Status penyelesaian materi OLEH SISWA (core_completion_get_activities_completion_status).
-    // Hanya materi yang sudah DISELESAIKAN siswa yang masuk daftar @materi.
-    // [v0.9.21] userId otoritatif (email → enrolled users), bukan id DOM yang bisa keliru.
-    const _resolvedUid = await resolveStudentUserId(projectId, meta, courseId);
-    const moodleUserId = _resolvedUid.userId || null;
+    // ── 3) Progress siswa: cache segar → live → cache basi ──
     const completionByCmid = new Map();
     let completionTotal = 0; let completionDone = 0;
     let completionSource = 'none';
+    let progressUnknown = false;
     if (moodleUserId) {
-      // [v0.9.85 Track 2] Utamakan cache kemajuan per-siswa (DB) selama masih segar (TTL 24 jam)
-      // → hemat panggilan Moodle live tiap buka "@materi". Cache diisi lewat /chat/ensure-moodle-sync
-      // saat siswa klik widget. Map cache hanya berisi cmid yang SUDAH selesai (yang lain =
-      // tidak ada di map = belum selesai), setara perilaku live untuk isCompleted & lock.
-      try {
-        const cached = await studentProgressModel.find(projectId, moodleUserId, courseId);
-        if (cached && !moodleSyncGate.isStale(cached.last_synced_at) && Array.isArray(cached.completed_cmids)) {
-          cached.completed_cmids.forEach((cmid) => {
-            completionByCmid.set(Number(cmid), { cmid: Number(cmid), state: 1, isoverallcomplete: true });
-          });
-          completionTotal = Number(cached.completion_total || cached.completed_cmids.length);
-          completionSource = 'cache';
-        }
-      } catch (e) { console.warn('[SessionMaterials] baca cache progress gagal:', e.message); }
+      let cachedRow = null;
+      try { cachedRow = await studentProgressModel.find(projectId, moodleUserId, courseId); }
+      catch (e) { console.warn('[SessionMaterials] baca cache progress gagal:', e.message); }
 
-      if (completionSource !== 'cache') {
-        try {
-          const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, moodleUserId);
-          const statuses = Array.isArray(compRes?.statuses) ? compRes.statuses : [];
-          completionTotal = statuses.length;
-          statuses.forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
-          completionSource = 'live';
-        } catch (e) { console.warn('[SessionMaterials] completion gagal:', e.message); }
+      const useCache = (row) => {
+        (row.completed_cmids || []).forEach((cmid) => {
+          completionByCmid.set(Number(cmid), { cmid: Number(cmid), state: 1, isoverallcomplete: true });
+        });
+        completionTotal = Number(row.completion_total || (row.completed_cmids || []).length);
+        completionSource = 'cache';
+      };
+      const hasCache = Boolean(cachedRow) && Array.isArray(cachedRow.completed_cmids);
+
+      if (hasCache && !moodleSyncGate.isStale(cachedRow.last_synced_at)) {
+        useCache(cachedRow); // cache masih segar → tanpa Moodle
+      } else {
+        const r = await getReach();
+        reachOk = r.ok;
+        if (r.ok) {
+          try {
+            const compRes = await moodleService.getActivitiesCompletionStatus(projectId, courseId, moodleUserId);
+            const statuses = Array.isArray(compRes?.statuses) ? compRes.statuses : [];
+            completionTotal = statuses.length;
+            statuses.forEach((s) => { if (s && s.cmid != null) completionByCmid.set(Number(s.cmid), s); });
+            completionSource = 'live';
+          } catch (e) {
+            console.warn('[SessionMaterials] completion gagal:', e.message);
+            if (hasCache) useCache(cachedRow);
+          }
+        } else if (hasCache) {
+          useCache(cachedRow); // offline → cache basi
+        }
       }
     }
+    if (completionSource === 'none') progressUnknown = true;
+    const UNKNOWN_PROGRESS_MODE = String(process.env.MOODLE_OFFLINE_UNKNOWN_PROGRESS || 'unlock').toLowerCase();
+
     const isCompleted = (st) => Boolean(st) && (st.isoverallcomplete === true || [1, 2, 3].includes(Number(st.state)));
 
     // Peta dokumen RAG → document_id (untuk pencarian tertarget @materi).
-    let docs = [];
-    try { docs = (await documentModel.findByProjectId(projectId)) || []; } catch (_) { docs = []; }
     const byUrl = new Map();
     const byTitle = new Map();
-    docs.forEach((d) => {
+    (docs || []).forEach((d) => {
       if (d.source_url) byUrl.set(d.source_url, d.id);
       if (d.title) byTitle.set(norm(d.title), d.id);
     });
@@ -610,7 +669,7 @@ const chatController = {
     (Array.isArray(sections) ? sections : []).forEach((section) => {
       (section.modules || []).forEach((mod) => {
         const prevForThis = prevModuleId;
-        prevModuleId = Number(mod.id); // update untuk modul berikutnya (urutan course)
+        prevModuleId = Number(mod.id);
 
         if (mod.visible === 0) return; // disembunyikan instruktur
         if (!MATERI_MODNAMES.includes(String(mod.modname || '').toLowerCase())) return;
@@ -620,11 +679,9 @@ const chatController = {
         const completed = isCompleted(completionByCmid.get(Number(mod.id)));
         if (completed) completionDone += 1;
 
-        // [v0.9.22] TAMPILKAN SEMUA materi (sesuai spec user); jangan disaring berdasarkan
-        // gembok. Cross-check: TERBUKA bila tak ada syarat ATAU prasyaratnya sudah selesai
-        // di completion siswa. Yang masih terkunci tetap ditampilkan dengan locked=true
-        // (FE akan men-disable-nya).
-        const locked = computeModuleLocked(mod, prevForThis, completionByCmid, availabilityInfo);
+        const locked = (progressUnknown && !reachOk && UNKNOWN_PROGRESS_MODE === 'unlock')
+          ? false
+          : computeModuleLocked(mod, prevForThis, completionByCmid, availabilityInfo);
         if (locked) lockedCount += 1;
 
         const url = mod.url || null;
@@ -636,16 +693,17 @@ const chatController = {
           completed,
           section: decodeEntities(section.name),
           availability_info: locked ? (availabilityInfo || null) : null,
-          document_id: documentId
+          document_id: documentId,
+          source: contentSource
         });
       });
     });
 
     console.log('[SessionMaterials] diag:', JSON.stringify({
-      courseId, domUserId: meta.moodle_user_id || null, email: meta.email || null,
-      finalUserId: moodleUserId, userIdSource: _resolvedUid.source,
+      courseId, finalUserId: moodleUserId, userIdSource: uid.source,
       sections: Array.isArray(sections) ? sections.length : 0,
-      completionSource, completionTotal, completionDone, materialsReturned: materials.length, lockedCount
+      completionSource, completionTotal, completionDone, materialsReturned: materials.length,
+      lockedCount, contentSource, progressUnknown, snapAgeMs: Number.isFinite(snapAge) ? snapAge : null, forceFresh
     }));
     return response.success(res, 'Materi kelas berhasil diambil', materials, 200);
   }),
@@ -676,15 +734,6 @@ const chatController = {
     const empty = { Kuis: [], Tugas: [], Materi: [], Forum: [] };
     if (!courseId) return response.success(res, 'Course belum terdeteksi', empty, 200);
 
-    let sections = [];
-    try {
-      // [v0.9.68] Di-cache: modal Komplain & Komplain Nilai memanggil endpoint ini tiap dibuka.
-      sections = await moodleService.cached(`contents:${projectId}:${courseId}`,
-        () => moodleService.getCourseContents(projectId, courseId));
-    } catch (e) {
-      console.warn('[SessionActivities] getCourseContents gagal:', e.message);
-      return response.success(res, 'Gagal memuat aktivitas dari Moodle', empty, 200);
-    }
 
     // [v0.9.22] Completion siswa (userId otoritatif) untuk cross-check gembok per aktivitas.
     const _uid = await resolveStudentUserId(projectId, meta, courseId);
